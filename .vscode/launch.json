@@ -1,0 +1,24 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "STM32 Debug",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/ai_assistant.elf",
+            "request": "launch",
+            "type": "cortex-debug",
+            "runToEntryPoint": "main",
+            "servertype": "openocd",
+            "device": "STM32F103VE",
+            "configFiles": [
+                "interface/cmsis-dap.cfg",
+                "target/stm32f1x.cfg"
+            ],
+            "gdbPath": "gdb-multiarch",
+            "objdumpPath": "/usr/bin/arm-none-eabi-objdump",
+            "toolchainPrefix": "arm-none-eabi",
+            "preLaunchTask": "Build STM32 Project",
+            "showDevDebugOutput": "parsed"
+        }
+    ]
+}
