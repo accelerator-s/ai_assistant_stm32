@@ -86,6 +86,32 @@ static uint8_t s_baud_idx; /* 当前正在尝试的波特率索引 */
 /* 上电等待时间 */
 #define POWERON_DELAY 2000
 
+/* TCP 建连等待超时（服务器忙/网络抖动时 3s 偏短，容易误判失败） */
+#define TCP_CONNECT_TIMEOUT 10000
+
+/* ==================== TCP 非阻塞状态机 ==================== */
+
+typedef enum
+{
+    TCP_PHASE_IDLE = 0,      /* 空闲，未启动连接 */
+    TCP_PHASE_CIPMUX_SEND,   /* 发送 AT+CIPMUX=0 */
+    TCP_PHASE_CIPMUX_WAIT,   /* 等待 CIPMUX 响应 */
+    TCP_PHASE_CIPSTART_SEND, /* 发送 AT+CIPSTART */
+    TCP_PHASE_CIPSTART_WAIT, /* 等待 CONNECT 或错误 */
+    TCP_PHASE_DONE_OK,       /* 连接成功（等待主循环读取） */
+    TCP_PHASE_DONE_FAIL,     /* 连接失败（等待主循环读取） */
+    /* 心跳发送阶段（非阻塞） */
+    TCP_PHASE_HB_CIPSEND,     /* 发送 AT+CIPSEND=3 */
+    TCP_PHASE_HB_PROMPT_WAIT, /* 等待 > 提示符 */
+    TCP_PHASE_HB_DATA,        /* 发送心跳数据 "HB\n" */
+    TCP_PHASE_HB_ACK_WAIT,    /* 等待 SEND OK 确认 */
+} tcp_phase_t;
+
+static tcp_phase_t s_tcp_phase = TCP_PHASE_IDLE;
+static uint32_t s_tcp_phase_tick;
+static char s_tcp_server_ip[20];
+static uint16_t s_tcp_server_port;
+
 /* ==================== 底层串口操作 ==================== */
 
 /* ==================== CH_PD / RST 引脚操作 ==================== */
@@ -279,6 +305,188 @@ static void esp8266_set_phase(init_phase_t phase)
 {
     s_phase = phase;
     s_phase_tick = HAL_GetTick();
+}
+
+/**
+ * @brief 切换 TCP 状态机阶段并记录时间戳
+ */
+static void esp8266_set_tcp_phase(tcp_phase_t phase)
+{
+    s_tcp_phase = phase;
+    s_tcp_phase_tick = HAL_GetTick();
+}
+
+/**
+ * @brief 检查 TCP 阶段是否超时
+ */
+static int esp8266_tcp_phase_timeout(uint32_t ms)
+{
+    return (HAL_GetTick() - s_tcp_phase_tick) >= ms;
+}
+
+/* 前向声明：tcp_poll 中需要用到，但定义在后面 */
+static void esp8266_save_debug(const char *msg);
+
+/**
+ * @brief 链路监测：在 TCP 已连接状态下监测远端断开事件
+ *        ESP8266 会异步上报 CLOSED/CONNECT FAIL，不处理会导致状态滞后
+ */
+static void tcp_link_monitor(void)
+{
+    if (s_status != ESP8266_STATUS_TCP_CONNECTED)
+        return;
+    /* 状态机忙（心跳发送中等）时不做断链监测，避免干扰 */
+    if (s_tcp_phase != TCP_PHASE_DONE_OK)
+        return;
+
+    esp8266_snapshot_resp();
+    if (strstr(resp_buf, "CLOSED") != NULL ||
+        strstr(resp_buf, "CONNECT FAIL") != NULL ||
+        strstr(resp_buf, "link is not valid") != NULL)
+    {
+        s_status = ESP8266_STATUS_WIFI_GOT_IP;
+        s_tcp_phase = TCP_PHASE_IDLE;
+        esp8266_save_debug("TCP:Disconnected");
+        esp8266_clear_rx();
+    }
+}
+
+/**
+ * @brief TCP 非阻塞状态机驱动，由 esp8266_poll() 调用
+ *        每次调用只做一个非阻塞动作并立即返回，不使用 HAL_Delay
+ */
+static void tcp_poll(void)
+{
+    char cmd[128];
+
+    switch (s_tcp_phase)
+    {
+    case TCP_PHASE_IDLE:
+    case TCP_PHASE_DONE_OK:
+    case TCP_PHASE_DONE_FAIL:
+        /* 终止态：等待外部触发或读取结果，不继续推进 */
+        break;
+
+    case TCP_PHASE_CIPMUX_SEND:
+        esp8266_send_cmd("AT+CIPMUX=0");
+        esp8266_set_tcp_phase(TCP_PHASE_CIPMUX_WAIT);
+        break;
+
+    case TCP_PHASE_CIPMUX_WAIT:
+        /* CIPMUX 只用于关联模式设置，超时也继续 */
+        if (esp8266_check_resp("OK") || esp8266_tcp_phase_timeout(AT_CMD_TIMEOUT))
+            esp8266_set_tcp_phase(TCP_PHASE_CIPSTART_SEND);
+        break;
+
+    case TCP_PHASE_CIPSTART_SEND:
+        snprintf(cmd, sizeof(cmd), "AT+CIPSTART=\"TCP\",\"%s\",%u",
+                 s_tcp_server_ip, s_tcp_server_port);
+        esp8266_send_cmd(cmd);
+        esp8266_save_debug("TCP:Connecting..");
+        esp8266_set_tcp_phase(TCP_PHASE_CIPSTART_WAIT);
+        break;
+
+    case TCP_PHASE_CIPSTART_WAIT:
+        esp8266_snapshot_resp();
+        {
+            /*
+             * 调试：把原始响应的前30字符记录到调试信息
+             * 用于排查连接失败原因
+             */
+            if (resp_buf[0] != '\0')
+            {
+                char dbg[64];
+                snprintf(dbg, sizeof(dbg), "R:%.30s", resp_buf);
+                /* 替换换行符为可见字符 */
+                for (int i = 0; dbg[i]; i++)
+                {
+                    if (dbg[i] == '\r')
+                        dbg[i] = '<';
+                    if (dbg[i] == '\n')
+                        dbg[i] = '>';
+                }
+                esp8266_save_debug(dbg);
+            }
+
+            /*
+             * 判定顺序非常关键：
+             * 1. 先检查明确的失败关键字 CONNECT FAIL
+             * 2. 再用宽泛的 CONNECT 子串匹配成功（覆盖 CONNECT / ALREADY CONNECTED / Linked）
+             *    因为 CONNECT FAIL 已被步骤 1 排除，这里不会误判
+             * 3. 最后判断 ERROR / CLOSED / 超时
+             */
+            int connect_fail = (strstr(resp_buf, "CONNECT FAIL") != NULL);
+            int got_connect = (strstr(resp_buf, "CONNECT") != NULL) ||
+                              (strstr(resp_buf, "Linked") != NULL);
+            int got_error = (strstr(resp_buf, "ERROR") != NULL) ||
+                            (strstr(resp_buf, "CLOSED") != NULL);
+
+            if (connect_fail)
+            {
+                esp8266_save_debug("TCP:fail");
+                s_tcp_phase = TCP_PHASE_DONE_FAIL;
+            }
+            else if (got_connect)
+            {
+                s_status = ESP8266_STATUS_TCP_CONNECTED;
+                esp8266_save_debug("TCP:Connected");
+                s_tcp_phase = TCP_PHASE_DONE_OK;
+            }
+            else if (got_error || esp8266_tcp_phase_timeout(TCP_CONNECT_TIMEOUT))
+            {
+                esp8266_save_debug("TCP:fail");
+                s_tcp_phase = TCP_PHASE_DONE_FAIL;
+            }
+            break;
+        }
+
+    /* -------- 心跳发送（非阻塞） -------- */
+    case TCP_PHASE_HB_CIPSEND:
+        esp8266_send_cmd("AT+CIPSEND=3");
+        esp8266_set_tcp_phase(TCP_PHASE_HB_PROMPT_WAIT);
+        break;
+
+    case TCP_PHASE_HB_PROMPT_WAIT:
+        if (esp8266_check_resp(">"))
+        {
+            esp8266_set_tcp_phase(TCP_PHASE_HB_DATA);
+        }
+        else if (esp8266_check_resp("ERROR") ||
+                 esp8266_check_resp("CLOSED") ||
+                 esp8266_tcp_phase_timeout(AT_CMD_TIMEOUT))
+        {
+            /* 发送失败，链路已断 */
+            s_status = ESP8266_STATUS_WIFI_GOT_IP;
+            esp8266_save_debug("HB:link lost");
+            s_tcp_phase = TCP_PHASE_DONE_FAIL;
+            esp8266_clear_rx();
+        }
+        break;
+
+    case TCP_PHASE_HB_DATA:
+        esp8266_clear_rx(); /* 清除 > 符号，准备接收 SEND OK */
+        esp8266_send_str("HB\n");
+        esp8266_set_tcp_phase(TCP_PHASE_HB_ACK_WAIT);
+        break;
+
+    case TCP_PHASE_HB_ACK_WAIT:
+        esp8266_snapshot_resp();
+        if (strstr(resp_buf, "SEND OK") != NULL)
+        {
+            esp8266_clear_rx();
+            s_tcp_phase = TCP_PHASE_DONE_OK;
+        }
+        else if (strstr(resp_buf, "ERROR") != NULL ||
+                 strstr(resp_buf, "CLOSED") != NULL ||
+                 esp8266_tcp_phase_timeout(AT_CMD_TIMEOUT))
+        {
+            s_status = ESP8266_STATUS_WIFI_GOT_IP;
+            esp8266_save_debug("HB:send fail");
+            s_tcp_phase = TCP_PHASE_DONE_FAIL;
+            esp8266_clear_rx();
+        }
+        break;
+    }
 }
 
 /**
@@ -722,6 +930,12 @@ void esp8266_poll(void)
     default:
         break;
     }
+
+    /* 先做 TCP 断链监测，再驱动 TCP 非阻塞状态机 */
+    tcp_link_monitor();
+
+    /* 驱动 TCP 非阻塞状态机 */
+    tcp_poll();
 }
 
 /* ==================== 公共查询接口 ==================== */
@@ -757,19 +971,37 @@ int esp8266_get_ip(char *buf, uint16_t buf_size)
     return -1;
 }
 
-int esp8266_connect_tcp(const char *ip, uint16_t port)
+void esp8266_connect_tcp_async(const char *ip, uint16_t port)
 {
-    char cmd[128];
     if (s_status < ESP8266_STATUS_WIFI_CONNECTED)
-        return -1;
-    esp8266_send_at_blocking("AT+CIPMUX=0", "OK", AT_CMD_TIMEOUT);
-    snprintf(cmd, sizeof(cmd), "AT+CIPSTART=\"TCP\",\"%s\",%u", ip, port);
-    if (esp8266_send_at_blocking(cmd, "CONNECT", AT_CMD_TIMEOUT) == 0)
+        return;
+    strncpy(s_tcp_server_ip, ip, sizeof(s_tcp_server_ip) - 1);
+    s_tcp_server_ip[sizeof(s_tcp_server_ip) - 1] = '\0';
+    s_tcp_server_port = port;
+    esp8266_set_tcp_phase(TCP_PHASE_CIPMUX_SEND);
+}
+
+int esp8266_tcp_connect_state(void)
+{
+    switch (s_tcp_phase)
     {
-        s_status = ESP8266_STATUS_TCP_CONNECTED;
-        return 0;
+    case TCP_PHASE_DONE_OK:
+        return 1; /* 连接成功 */
+    case TCP_PHASE_DONE_FAIL:
+        return -1; /* 连接失败 */
+    case TCP_PHASE_IDLE:
+        return 0; /* 空闲（未启动） */
+    default:
+        return 0; /* 连接进行中 */
     }
-    return -1;
+}
+
+void esp8266_tcp_send_heartbeat(void)
+{
+    /* 只在 TCP 已连接且状态机空闲时才能发起心跳 */
+    if (s_status != ESP8266_STATUS_TCP_CONNECTED || s_tcp_phase != TCP_PHASE_DONE_OK)
+        return;
+    esp8266_set_tcp_phase(TCP_PHASE_HB_CIPSEND);
 }
 
 int esp8266_disconnect_tcp(void)

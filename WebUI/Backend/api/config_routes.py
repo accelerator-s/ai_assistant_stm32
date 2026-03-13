@@ -60,9 +60,12 @@ def get_status():
     connected_clients = 0
 
     if device_mgr:
+        probe = device_mgr.manual_heartbeat_probe()
         device_connected = device_mgr.has_connections()
         connected_clients = device_mgr.client_count()
-        device_info = f"{connected_clients} 个设备在线"
+        device_info = (
+            f"{connected_clients} 个设备在线"
+        )
 
     tcp_port = config.get("device.tcp_port", 8266) if config else 8266
 

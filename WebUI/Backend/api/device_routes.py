@@ -24,10 +24,18 @@ def test_device_connection():
 
     # 检查 TCP 服务器是否正在运行
     device_mgr = app_state.get("device_manager")
+    if device_mgr:
+        probe = device_mgr.manual_heartbeat_probe()
+    else:
+        probe = None
+
     if device_mgr and device_mgr.has_connections():
         return jsonify({
             "success": True,
-            "message": f"TCP 服务器运行中，{device_mgr.client_count()} 个设备已连接",
+            "message": (
+                f"TCP 服务器运行中，{device_mgr.client_count()} 个设备已连接"
+                f"（手动探测: 清理超时{probe['timeout_removed']}，发送失败{probe['send_fail_removed']}）"
+            ),
         })
 
     # 尝试检查 TCP 端口是否正在监听

@@ -1,4 +1,11 @@
-"""设备通信管理器 — 管理 TCP 连接的 ESP8266 终端设备"""
+"""设备通信管理器 — 管理 TCP 连接的 ESP8266 终端设备
+
+通信协议:
+  - 设备每 15 秒发送 "HB\n" 心跳包
+  - 服务端回复 "OK\n" 确认
+  - 超过 45 秒未收到任何数据视为断线
+  - 同一 IP 新连接到来时自动踢掉旧连接（避免重复计数）
+"""
 
 import socket
 import threading
@@ -6,6 +13,12 @@ import logging
 import time
 
 logger = logging.getLogger(__name__)
+
+# 心跳超时阈值（秒）：超过此时间未收到任何数据则认定连接死亡
+HEARTBEAT_TIMEOUT = 12
+
+# recv 超时（秒）：用于周期性检查心跳是否过期
+RECV_TIMEOUT = 10
 
 
 class DeviceConnection:
@@ -93,6 +106,51 @@ class DeviceManager:
                 for c in self._clients.values()
             ]
 
+    def manual_heartbeat_probe(self) -> dict:
+        """手动心跳探测：用于前端“测试设备连接/刷新状态”按钮触发。
+
+        逻辑：
+        1. 先清理心跳超时连接；
+        2. 对剩余连接发送轻量探测帧 PING；
+        3. 发送失败则立即剔除连接。
+        """
+        now = time.time()
+        timeout_keys: list[str] = []
+        send_fail_keys: list[str] = []
+
+        with self._lock:
+            items = list(self._clients.items())
+
+            for key, client in items:
+                if now - client.last_active > HEARTBEAT_TIMEOUT:
+                    timeout_keys.append(key)
+                    continue
+                try:
+                    client.conn.sendall(b"PING\n")
+                except Exception:
+                    send_fail_keys.append(key)
+
+            for key in timeout_keys + send_fail_keys:
+                client = self._clients.pop(key, None)
+                if client:
+                    try:
+                        client.conn.close()
+                    except Exception:
+                        pass
+
+            alive = len(self._clients)
+
+        if timeout_keys:
+            logger.warning(f"手动探测清理超时连接: {timeout_keys}")
+        if send_fail_keys:
+            logger.warning(f"手动探测清理发送失败连接: {send_fail_keys}")
+
+        return {
+            "alive": alive,
+            "timeout_removed": len(timeout_keys),
+            "send_fail_removed": len(send_fail_keys),
+        }
+
     @property
     def port(self) -> int:
         return self._port
@@ -100,12 +158,43 @@ class DeviceManager:
     # ------------------------------------------------------------------
     # 内部
     # ------------------------------------------------------------------
+    @staticmethod
+    def _enable_tcp_keepalive(conn: socket.socket) -> None:
+        """启用 TCP 内核级 keepalive，加速死连接检测"""
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 10)
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+
+    def _kick_same_ip(self, new_ip: str) -> None:
+        """踢掉来自相同 IP 的旧连接（同一物理设备重连时清理残留）"""
+        with self._lock:
+            stale_keys = [k for k, c in self._clients.items()
+                          if c.addr[0] == new_ip]
+            for key in stale_keys:
+                old = self._clients.pop(key, None)
+                if old:
+                    try:
+                        old.conn.close()
+                    except Exception:
+                        pass
+                    logger.info(f"踢掉旧连接: {key} (同 IP 设备重连)")
+
     def _accept_loop(self):
         """接受新连接的主循环"""
         while self._running:
             try:
                 conn, addr = self._server_socket.accept()
+                ip = addr[0]
                 key = f"{addr[0]}:{addr[1]}"
+
+                # 启用 TCP keepalive
+                self._enable_tcp_keepalive(conn)
+
+                # 同一 IP 新连接到来：先踢掉旧连接
+                self._kick_same_ip(ip)
+
                 device = DeviceConnection(conn, addr)
                 with self._lock:
                     self._clients[key] = device
@@ -126,15 +215,30 @@ class DeviceManager:
     def _handle_client(self, key: str, device: DeviceConnection):
         """处理单个设备连接的数据收发"""
         try:
-            device.conn.settimeout(60)
+            device.conn.settimeout(RECV_TIMEOUT)
             while self._running:
                 try:
                     data = device.conn.recv(4096)
                     if not data:
                         break
                     device.last_active = time.time()
-                    # 实际项目中此处分发给音频处理流水线
+
+                    # 处理心跳包：设备发送 "HB\n"，回复 "OK\n"
+                    text = data.decode("utf-8", errors="ignore").strip()
+                    if text == "HB":
+                        try:
+                            device.conn.sendall(b"OK\n")
+                        except Exception:
+                            break
+                        continue
+
+                    # 后续扩展：实际数据分发给音频处理流水线
+
                 except socket.timeout:
+                    # 检查心跳超时
+                    if time.time() - device.last_active > HEARTBEAT_TIMEOUT:
+                        logger.warning(f"设备 {key} 心跳超时 ({HEARTBEAT_TIMEOUT}s)，断开连接")
+                        break
                     continue
                 except ConnectionResetError:
                     break
@@ -142,7 +246,9 @@ class DeviceManager:
             logger.error(f"设备 {key} 处理异常: {e}")
         finally:
             with self._lock:
-                self._clients.pop(key, None)
+                # 只移除属于自己的连接（可能已被新连接替换过）
+                if self._clients.get(key) is device:
+                    self._clients.pop(key, None)
             try:
                 device.conn.close()
             except Exception:

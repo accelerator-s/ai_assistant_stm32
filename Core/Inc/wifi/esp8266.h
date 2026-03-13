@@ -38,8 +38,14 @@ const char *esp8266_get_ip_cached(void);
 /* 查询当前 IP 地址（阻塞），结果写入 buf，返回 0 表示成功 */
 int esp8266_get_ip(char *buf, uint16_t buf_size);
 
-/* 建立 TCP 连接到指定服务器（阻塞） */
-int esp8266_connect_tcp(const char *ip, uint16_t port);
+/* 非阻塞启动 TCP 连接，结果通过 esp8266_tcp_connect_state() 查询 */
+void esp8266_connect_tcp_async(const char *ip, uint16_t port);
+
+/* 查询非阻塞 TCP 连接结果：0=进行中/空闲，1=成功，-1=失败 */
+int esp8266_tcp_connect_state(void);
+
+/* 非阻塞发送一次心跳，需在 TCP 已连接且空闲时调用 */
+void esp8266_tcp_send_heartbeat(void);
 
 /* 关闭当前 TCP 连接（阻塞） */
 int esp8266_disconnect_tcp(void);

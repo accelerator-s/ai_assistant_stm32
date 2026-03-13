@@ -68,8 +68,56 @@ class Config:
                 self._data = json.load(f)
             logger.info(f"配置已加载: {self._path}")
         else:
-            self._data = {}
-            logger.warning(f"配置文件不存在，使用空配置: {self._path}")
+            # 配置缺省时：优先从 example 模板初始化，确保首次拉取可直接运行
+            template_path = self._path.with_name("default_config.example.json")
+            if template_path.exists():
+                with open(template_path, "r", encoding="utf-8") as f:
+                    self._data = json.load(f)
+                self._save_unlocked()
+                logger.warning(f"配置文件不存在，已从模板初始化: {self._path}")
+            else:
+                # 兜底默认值，避免模板缺失导致启动失败
+                self._data = {
+                    "device": {
+                        "tcp_port": 8266,
+                        "tcp_host": "0.0.0.0",
+                        "device_name": "STM32F103VET6",
+                        "audio_sample_rate": 16000,
+                        "audio_bit_depth": 16
+                    },
+                    "speech": {
+                        "provider": "tencent",
+                        "secret_id": "",
+                        "secret_key": "",
+                        "region": "ap-shanghai",
+                        "model": "16k_zh",
+                        "language": "zh"
+                    },
+                    "llm": {
+                        "base_url": "",
+                        "api_key": "",
+                        "model": "gpt-4",
+                        "system_prompt": "你是一个智能语音助手，运行在STM32嵌入式设备上。请用简洁友好的中文回答用户的问题。",
+                        "max_tokens": 512,
+                        "temperature": 0.7
+                    },
+                    "tts": {
+                        "provider": "openai_tts",
+                        "base_url": "",
+                        "api_key": "",
+                        "model": "tts-1",
+                        "voice": "alloy"
+                    },
+                    "advanced": {
+                        "service_port": 5000,
+                        "log_level": "INFO",
+                        "session_expiry_hours": 24,
+                        "max_history_per_session": 50,
+                        "audio_buffer_timeout_sec": 30
+                    }
+                }
+                self._save_unlocked()
+                logger.warning(f"配置文件与模板都不存在，已写入兜底默认配置: {self._path}")
 
     def _save_unlocked(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)

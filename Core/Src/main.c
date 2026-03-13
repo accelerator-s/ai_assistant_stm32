@@ -42,6 +42,9 @@ int main(void)
   char last_debug[64] = {0};
   char last_ip[20] = {0}; /* 缓存上次显示的 IP，用于检测 IP 变化 */
   uint32_t last_tcp_try_tick = 0;
+  uint8_t tcp_async_started = 0;    /* 非阻塞 TCP 连接已触发标志 */
+  uint32_t last_hb_tick = 0;        /* 上次心跳发送时间戳 */
+#define HEARTBEAT_INTERVAL_MS 15000 /* 心跳间隔 15 秒 */
 
   while (1)
   {
@@ -67,8 +70,10 @@ int main(void)
         break;
       case ESP8266_STATUS_WIFI_CONNECTED:
       case ESP8266_STATUS_WIFI_GOT_IP:
+        display_update_wifi("WiFi已连接", COLOR_GREEN);
+        break;
       case ESP8266_STATUS_TCP_CONNECTED:
-        display_update_wifi("已连接", COLOR_GREEN);
+        display_update_wifi("TCP已连接", COLOR_GREEN);
         break;
       case ESP8266_STATUS_ERROR:
         display_update_wifi("连接失败", COLOR_RED);
@@ -86,22 +91,41 @@ int main(void)
       display_update_ip(cur_ip);
     }
 
-    /* WiFi 获取 IP 后自动建立 TCP 连接到后端设备服务 */
-    /* 增加一个限制: 必须等 IP 解析后(last_ip不再为空)，并且间隔5秒再试一次，防止死锁卡住主程序的IP显示 */
+    /* WiFi 获取 IP 后自动建立 TCP 连接到后端设备服务（非阻塞） */
     if ((wifi_st == ESP8266_STATUS_WIFI_CONNECTED || wifi_st == ESP8266_STATUS_WIFI_GOT_IP) &&
         last_ip[0] != '\0' &&
+        !tcp_async_started &&
         (HAL_GetTick() - last_tcp_try_tick) > 5000)
     {
-      last_tcp_try_tick = HAL_GetTick();
-      if (esp8266_connect_tcp(SERVER_IP, SERVER_PORT) == 0)
+      /* 触发非阻塞 TCP 连接，主循环不会被卡住 */
+      esp8266_connect_tcp_async(SERVER_IP, SERVER_PORT);
+      tcp_async_started = 1;
+    }
+
+    /* 非阻塞查询 TCP 连接结果 */
+    if (tcp_async_started)
+    {
+      int tcp_st = esp8266_tcp_connect_state();
+      if (tcp_st == 1)
       {
-        /* 避免被 esp8266_get_debug_msg 覆盖，直接显式调用显示，不改变 last_debug，这样下一帧可能被刷掉，但状态会变 */
+        tcp_async_started = 0;
         display_update_debug("TCP Connect OK");
       }
-      else
+      else if (tcp_st == -1)
       {
+        tcp_async_started = 0;
+        /* 连接失败，5 秒后允许重试 */
+        last_tcp_try_tick = HAL_GetTick();
         display_update_debug("TCP Connect Fail");
       }
+    }
+
+    /* TCP 已连接时定期发送心跳，保持链路活性 */
+    if (wifi_st == ESP8266_STATUS_TCP_CONNECTED &&
+        (HAL_GetTick() - last_hb_tick) >= HEARTBEAT_INTERVAL_MS)
+    {
+      esp8266_tcp_send_heartbeat();
+      last_hb_tick = HAL_GetTick();
     }
 
     /* 刷新调试信息（变化时更新） */

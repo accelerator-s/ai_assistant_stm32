@@ -6,6 +6,11 @@ __pycache__/
 
 # Database
 data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# Local config (contains secrets)
+config/default_config.json
 
 # IDE
 .idea/
