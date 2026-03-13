@@ -1,0 +1,39 @@
+{
+  "device": {
+    "tcp_port": 8266,
+    "tcp_host": "0.0.0.0",
+    "device_name": "STM32F103VET6",
+    "audio_sample_rate": 16000,
+    "audio_bit_depth": 16
+  },
+  "speech": {
+    "provider": "tencent",
+    "secret_id": "",
+    "secret_key": "",
+    "region": "ap-shanghai",
+    "model": "16k_zh",
+    "language": "zh"
+  },
+  "llm": {
+    "base_url": "",
+    "api_key": "",
+    "model": "gpt-4",
+    "system_prompt": "你是一个智能语音助手，运行在STM32嵌入式设备上。请用简洁友好的中文回答用户的问题。",
+    "max_tokens": 512,
+    "temperature": 0.7
+  },
+  "tts": {
+    "provider": "openai_tts",
+    "base_url": "",
+    "api_key": "",
+    "model": "tts-1",
+    "voice": "alloy"
+  },
+  "advanced": {
+    "service_port": 5000,
+    "log_level": "INFO",
+    "session_expiry_hours": 24,
+    "max_history_per_session": 50,
+    "audio_buffer_timeout_sec": 30
+  }
+}

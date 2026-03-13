@@ -1,0 +1,87 @@
+/* ===================================================
+   STM32 语音助手控制台 — Design Tokens
+   Microsoft Azure Portal Theme
+   =================================================== */
+
+:root {
+  /* ---- Azure Primary ---- */
+  --azure-blue:           #0078d4;
+  --azure-blue-hover:     #106ebe;
+  --azure-blue-active:    #005a9e;
+  --azure-blue-light:     #deecf9;
+  --azure-blue-lighter:   #eff6fc;
+
+  /* ---- Header ---- */
+  --header-bg:            #0078d4;
+  --header-height:        58px;
+
+  /* ---- Sidebar ---- */
+  --sidebar-width:        240px;
+  --sidebar-bg:           #ffffff;
+  --sidebar-hover:        #f3f2f1;
+  --sidebar-active-bg:    #deecf9;
+  --sidebar-active-bar:   #0078d4;
+  --sidebar-section-color:#605e5c;
+  --sidebar-item-color:   #323130;
+
+  /* ---- Functional ---- */
+  --color-success:        #107c10;
+  --color-success-bg:     #dff6dd;
+  --color-warning:        #797600;
+  --color-warning-bg:     #fff4ce;
+  --color-danger:         #d13438;
+  --color-danger-bg:      #fde7e9;
+  --color-info:           #0078d4;
+  --color-info-bg:        #deecf9;
+
+  /* ---- Neutral (Fluent) ---- */
+  --color-text-primary:   #323130;
+  --color-text-secondary: #605e5c;
+  --color-text-tertiary:  #a19f9d;
+  --color-text-disabled:  #c8c6c4;
+  --color-border:         #edebe9;
+  --color-border-strong:  #c8c6c4;
+  --color-surface:        #ffffff;
+  --color-bg:             #f3f2f1;
+  --color-bg-alt:         #faf9f8;
+
+  /* ---- Radius ---- */
+  --radius-sm:  4px;
+  --radius-md:  6px;
+
+  /* ---- Shadow (Fluent depth) ---- */
+  --shadow-4:   0 1.6px 3.6px rgba(0,0,0,.132), 0 0.3px 0.9px rgba(0,0,0,.108);
+  --shadow-8:   0 3.2px 7.2px rgba(0,0,0,.132), 0 0.6px 1.8px rgba(0,0,0,.108);
+  --shadow-16:  0 6.4px 14.4px rgba(0,0,0,.132), 0 1.2px 3.6px rgba(0,0,0,.108);
+
+  /* ---- Typography ---- */
+  --font-family:      "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, "Helvetica Neue", Arial, "Microsoft YaHei", sans-serif;
+  --font-family-mono: Consolas, "Liberation Mono", Menlo, Courier, monospace;
+  --font-size-xs:     12px;
+  --font-size-sm:     13px;
+  --font-size-md:     14px;
+  --font-size-lg:     16px;
+  --font-size-xl:     18px;
+  --font-size-xxl:    20px;
+
+  /* ---- Element Plus Overrides ---- */
+  --el-color-primary:            var(--azure-blue);
+  --el-color-primary-light-3:    #2b88d8;
+  --el-color-primary-light-5:    #71afe5;
+  --el-color-primary-light-7:    #c7e0f4;
+  --el-color-primary-light-8:    #deecf9;
+  --el-color-primary-light-9:    #eff6fc;
+  --el-color-primary-dark-2:     var(--azure-blue-hover);
+  --el-color-success:            var(--color-success);
+  --el-color-danger:             var(--color-danger);
+  --el-border-radius-base:       var(--radius-sm);
+  --el-border-color:             var(--color-border);
+  --el-fill-color-blank:         var(--color-surface);
+  --el-bg-color:                 var(--color-bg);
+  --el-text-color-primary:       var(--color-text-primary);
+  --el-text-color-regular:       var(--color-text-secondary);
+  --el-text-color-secondary:     var(--color-text-tertiary);
+  --el-text-color-placeholder:   var(--color-text-disabled);
+  --el-font-family:              var(--font-family);
+  --el-font-size-base:           var(--font-size-md);
+}

@@ -51,6 +51,7 @@ Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash.c \
 Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash_ex.c \
 Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_exti.c \
 Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_spi.c \
+Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_uart.c \
 Core/Src/system_stm32f1xx.c \
 Core/Src/sysmem.c \
 Core/Src/syscalls.c \
@@ -58,7 +59,9 @@ Core/Src/lcd/lcd.c \
 Core/Src/lcd/font.c \
 Core/Src/lcd/display.c \
 Core/Src/bsp/bsp_key.c \
-Core/Src/bsp/bsp_spi_flash.c
+Core/Src/bsp/bsp_spi_flash.c \
+Core/Src/wifi/esp8266.c \
+Core/Src/debug/debug_uart.c
 
 # ASM sources
 ASM_SOURCES =  \
@@ -122,6 +125,8 @@ C_INCLUDES =  \
 -ICore/Inc \
 -ICore/Inc/bsp \
 -ICore/Inc/lcd \
+-ICore/Inc/wifi \
+-ICore/Inc/debug \
 -IDrivers/STM32F1xx_HAL_Driver/Inc/Legacy \
 -IDrivers/STM32F1xx_HAL_Driver/Inc \
 -IDrivers/CMSIS/Device/ST/STM32F1xx/Include \

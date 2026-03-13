@@ -59,6 +59,7 @@ extern "C"
   /* USER CODE BEGIN EFP */
   void EXTI0_IRQHandler(void);
   void EXTI15_10_IRQHandler(void);
+  void USART3_IRQHandler(void);
   /* USER CODE END EFP */
 
 #ifdef __cplusplus

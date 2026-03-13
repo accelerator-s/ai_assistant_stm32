@@ -5,6 +5,7 @@
 
 #include "main.h"
 #include "stm32f1xx_it.h"
+#include "wifi/esp8266.h"
 
 /******************************************************************************/
 /*           Cortex-M3 异常处理                                                */
@@ -68,4 +69,10 @@ void EXTI0_IRQHandler(void)
 void EXTI15_10_IRQHandler(void)
 {
   HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_13);
+}
+
+/* ESP8266 — USART3 */
+void USART3_IRQHandler(void)
+{
+  esp8266_uart_irq_handler();
 }
