@@ -2,7 +2,44 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "STM32 Debug",
+            "name": "STM32 Debug (Windows - OpenOCD)",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/ai_assistant.elf",
+            "request": "launch",
+            "type": "cortex-debug",
+            "runToEntryPoint": "main",
+            "servertype": "openocd",
+            "device": "STM32F103VE",
+            "configFiles": [
+                "interface/cmsis-dap.cfg",
+                "target/stm32f1x.cfg"
+            ],
+            "gdbPath": "arm-none-eabi-gdb",
+            "objdumpPath": "arm-none-eabi-objdump",
+            "toolchainPrefix": "arm-none-eabi",
+            "preLaunchTask": "Build STM32 Project (Windows)",
+            "showDevDebugOutput": "parsed",
+            "windows": {
+                "serverpath": "openocd.exe"
+            }
+        },
+        {
+            "name": "STM32 Debug (Windows - ST-Link)",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/ai_assistant.elf",
+            "request": "launch",
+            "type": "cortex-debug",
+            "runToEntryPoint": "main",
+            "servertype": "stlink",
+            "device": "STM32F103VE",
+            "gdbPath": "arm-none-eabi-gdb",
+            "objdumpPath": "arm-none-eabi-objdump",
+            "toolchainPrefix": "arm-none-eabi",
+            "preLaunchTask": "Build STM32 Project (Windows)",
+            "showDevDebugOutput": "parsed"
+        },
+        {
+            "name": "STM32 Debug (Linux/macOS)",
             "cwd": "${workspaceFolder}",
             "executable": "${workspaceFolder}/build/ai_assistant.elf",
             "request": "launch",

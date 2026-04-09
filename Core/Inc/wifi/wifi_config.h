@@ -8,10 +8,10 @@
 /* ===================== WiFi 热点配置 ===================== */
 
 /* 目标 WiFi 的 SSID（热点名称） */
-#define WIFI_SSID "OPPO Find X6 Pro"
+#define WIFI_SSID "fatalnova"
 
 /* 目标 WiFi 的密码 */
-#define WIFI_PASSWORD "87654321"
+#define WIFI_PASSWORD "12345678z"
 
 /* ===================== 服务器地址配置 ===================== */
 

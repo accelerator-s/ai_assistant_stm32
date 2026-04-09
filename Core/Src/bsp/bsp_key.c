@@ -20,24 +20,17 @@ void bsp_key_init(void)
 
     GPIO_InitTypeDef gpio = {0};
 
-    /* K1 — PA0 双沿 EXTI */
+    /* K1 — PA0 输入模式 */
     gpio.Pin = KEY1_GPIO_PIN;
-    gpio.Mode = GPIO_MODE_IT_RISING_FALLING;
+    gpio.Mode = GPIO_MODE_INPUT;
     gpio.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(KEY1_GPIO_PORT, &gpio);
 
-    /* K2 — PC13 双沿 EXTI */
+    /* K2 — PC13 输入模式 */
     gpio.Pin = KEY2_GPIO_PIN;
-    gpio.Mode = GPIO_MODE_IT_RISING_FALLING;
+    gpio.Mode = GPIO_MODE_INPUT;
     gpio.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(KEY2_GPIO_PORT, &gpio);
-
-    /* NVIC */
-    HAL_NVIC_SetPriority(EXTI0_IRQn, 2, 0);
-    HAL_NVIC_EnableIRQ(EXTI0_IRQn);
-
-    HAL_NVIC_SetPriority(EXTI15_10_IRQn, 2, 0);
-    HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
     /* 读取初始电平 */
     s_k1_state = (HAL_GPIO_ReadPin(KEY1_GPIO_PORT, KEY1_GPIO_PIN) == KEY1_ACTIVE_LVL)
@@ -74,21 +67,31 @@ uint8_t bsp_key_k2_changed(void)
     return 0;
 }
 
-/* EXTI 回调 */
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+/* 按钮状态更新函数（在主循环中调用） */
+void bsp_key_update(void)
 {
-    if (GPIO_Pin == KEY1_GPIO_PIN)
-    {
-        s_k1_state = (HAL_GPIO_ReadPin(KEY1_GPIO_PORT, KEY1_GPIO_PIN) == KEY1_ACTIVE_LVL)
-                         ? KEY_PRESSED
-                         : KEY_RELEASED;
-        s_k1_changed = 1;
-    }
-    if (GPIO_Pin == KEY2_GPIO_PIN)
-    {
-        s_k2_state = (HAL_GPIO_ReadPin(KEY2_GPIO_PORT, KEY2_GPIO_PIN) == KEY2_ACTIVE_LVL)
-                         ? KEY_PRESSED
-                         : KEY_RELEASED;
-        s_k2_changed = 1;
+    static uint32_t last_update_time = 0;
+    uint32_t current_time = HAL_GetTick();
+
+    /* 每10ms更新一次按钮状态 */
+    if (current_time - last_update_time >= 10) {
+        uint8_t new_k1_state = (HAL_GPIO_ReadPin(KEY1_GPIO_PORT, KEY1_GPIO_PIN) == KEY1_ACTIVE_LVL)
+                                 ? KEY_PRESSED
+                                 : KEY_RELEASED;
+        uint8_t new_k2_state = (HAL_GPIO_ReadPin(KEY2_GPIO_PORT, KEY2_GPIO_PIN) == KEY2_ACTIVE_LVL)
+                                 ? KEY_PRESSED
+                                 : KEY_RELEASED;
+
+        if (new_k1_state != s_k1_state) {
+            s_k1_state = new_k1_state;
+            s_k1_changed = 1;
+        }
+
+        if (new_k2_state != s_k2_state) {
+            s_k2_state = new_k2_state;
+            s_k2_changed = 1;
+        }
+
+        last_update_time = current_time;
     }
 }

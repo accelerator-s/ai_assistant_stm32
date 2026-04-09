@@ -1,7 +1,25 @@
 {
     "configurations": [
         {
-            "name": "STM32",
+            "name": "STM32 (Windows)",
+            "includePath": [
+                "${workspaceFolder}/**"
+            ],
+            "defines": [
+                "USE_HAL_DRIVER",
+                "STM32F103xE"
+            ],
+            "compilerPath": "arm-none-eabi-gcc",
+            "cStandard": "gnu11",
+            "cppStandard": "gnu++14",
+            "intelliSenseMode": "gcc-arm",
+            "compilerArgs": [
+                "-mcpu=cortex-m3",
+                "-mthumb"
+            ]
+        },
+        {
+            "name": "STM32 (Linux/macOS)",
             "includePath": [
                 "${workspaceFolder}/**"
             ],

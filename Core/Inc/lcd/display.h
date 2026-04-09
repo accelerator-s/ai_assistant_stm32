@@ -21,11 +21,19 @@ void display_update_wifi(const char *text, uint16_t color);
 /* 刷新 IP 地址显示 */
 void display_update_ip(const char *ip);
 
-/* 刷新 K1 按键状态 (1=按下, 0=松开) */
-void display_update_key1(uint8_t pressed);
+/* 刷新 K1 按键状态
+ * 0=松开, 1=按下, 2=录音中, 3=录音暂停, 4=错误
+ */
+void display_update_key1(uint8_t state);
+
+/* 刷新 K1 按键文本（直接显示字符串） */
+void display_update_key1_str(const char *text);
 
 /* 刷新 K2 按键状态 (1=按下, 0=松开) */
 void display_update_key2(uint8_t pressed);
+
+/* 刷新 K2 按键文本（直接显示字符串） */
+void display_update_key2_str(const char *text);
 
 /* 刷新调试信息文本 */
 void display_update_debug(const char *text);

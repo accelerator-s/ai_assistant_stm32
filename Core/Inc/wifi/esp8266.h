@@ -56,6 +56,12 @@ int esp8266_tcp_send(const uint8_t *data, uint16_t len);
 /* 获取调试信息字符串（最后一次关键事件的描述） */
 const char *esp8266_get_debug_msg(void);
 
+/* 检查是否有TCP数据可读 */
+uint16_t esp8266_tcp_data_available(void);
+
+/* 读取TCP数据 */
+uint16_t esp8266_tcp_read(uint8_t *buffer, uint16_t max_len);
+
 /* UART 接收中断回调，由 USART3_IRQHandler 内部调用 */
 void esp8266_uart_irq_handler(void);
 

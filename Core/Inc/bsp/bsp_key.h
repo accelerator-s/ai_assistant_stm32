@@ -15,7 +15,7 @@
 
 #define KEY2_GPIO_PORT GPIOC
 #define KEY2_GPIO_PIN GPIO_PIN_13
-#define KEY2_ACTIVE_LVL GPIO_PIN_SET
+#define KEY2_ACTIVE_LVL GPIO_PIN_RESET
 
 /* 状态值 */
 #define KEY_RELEASED 0
@@ -23,6 +23,7 @@
 
 /* 接口函数 */
 void bsp_key_init(void);
+void bsp_key_update(void);  /* 在主循环中调用，更新按钮状态 */
 uint8_t bsp_key_get_k1(void);
 uint8_t bsp_key_get_k2(void);
 uint8_t bsp_key_k1_changed(void);

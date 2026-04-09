@@ -11,8 +11,11 @@
 #include "lcd/display.h"
 #include "wifi/esp8266.h"
 #include "wifi/wifi_config.h"
+#include "audio/microphone.h"
 #include "debug/debug_uart.h"
+#include "system/system_controller.h"
 #include <string.h>
+#include <stdio.h>
 
 /* Private function prototypes -----------------------------------------------*/
 /* 配置系统时钟 72 MHz */
@@ -28,31 +31,57 @@ int main(void)
   bsp_key_init();
   display_init();
 
+  /* 初始化麦克风 */
+  if (!microphone_init()) {
+    display_update_debug("麦克风初始化失败");
+  } else {
+    display_update_debug("麦克风初始化成功");
+
+    /* 配置麦克风为混合模式，启用音频处理 */
+    if (!microphone_configure(MIC_MODE_HYBRID, true)) {
+      display_update_debug("麦克风配置失败");
+    } else {
+      display_update_debug("麦克风配置成功");
+    }
+  }
+
   /* 启动 ESP8266 非阻塞状态机（不会卡住主程序） */
   esp8266_init();
 
-  /* 首次显示 */
-  display_update_key1(bsp_key_get_k1());
-  display_update_key2(bsp_key_get_k2());
-  display_update_wifi("初始化中...", COLOR_YELLOW);
-  display_update_ip(NULL);
+  /* 初始化系统控制器 */
+  system_controller_init();
 
-  /* 主循环 */
+  /* 首次显示 */
+  display_update_key1_str("就绪");
+  display_update_key2_str("就绪");
+  display_update_wifi("初始化中...", COLOR_YELLOW);
+  display_update_ip("等待连接");
+
+  /* 调试信息：显示按钮初始化状态 */
+  display_update_debug("按钮初始化完成");
+
+  /* 主循环变量 */
   esp8266_status_t last_wifi_st = ESP8266_STATUS_IDLE;
-  char last_debug[64] = {0};
-  char last_ip[20] = {0}; /* 缓存上次显示的 IP，用于检测 IP 变化 */
+  char last_ip[20] = {0};
   uint32_t last_tcp_try_tick = 0;
-  uint8_t tcp_async_started = 0;    /* 非阻塞 TCP 连接已触发标志 */
-  uint32_t last_hb_tick = 0;        /* 上次心跳发送时间戳 */
-#define HEARTBEAT_INTERVAL_MS 15000 /* 心跳间隔 15 秒 */
+  uint8_t tcp_async_started = 0;
+  uint32_t last_uptime_update = 0;
 
   while (1)
   {
+    uint32_t current_time = HAL_GetTick();
+
     /* 驱动 ESP8266 状态机前进（非阻塞） */
     esp8266_poll();
 
-    /* 刷新运行时间 */
-    display_update_uptime(HAL_GetTick() / 1000);
+    /* 更新按钮状态 */
+    bsp_key_update();
+
+    /* 更新运行时间（每秒更新一次） */
+    if (current_time - last_uptime_update >= 1000) {
+      display_update_uptime(current_time / 1000);
+      last_uptime_update = current_time;
+    }
 
     /* WiFi 状态变化时刷新显示 */
     esp8266_status_t wifi_st = esp8266_get_status();
@@ -82,7 +111,7 @@ int main(void)
       last_wifi_st = wifi_st;
     }
 
-    /* IP 地址变化时刷新显示（CIFSR 返回后 IP 才可用） */
+    /* IP 地址变化时刷新显示 */
     const char *cur_ip = esp8266_get_ip_cached();
     if (cur_ip && cur_ip[0] != '\0' && strcmp(cur_ip, last_ip) != 0)
     {
@@ -95,7 +124,7 @@ int main(void)
     if ((wifi_st == ESP8266_STATUS_WIFI_CONNECTED || wifi_st == ESP8266_STATUS_WIFI_GOT_IP) &&
         last_ip[0] != '\0' &&
         !tcp_async_started &&
-        (HAL_GetTick() - last_tcp_try_tick) > 5000)
+        (current_time - last_tcp_try_tick) > 5000)
     {
       /* 触发非阻塞 TCP 连接，主循环不会被卡住 */
       esp8266_connect_tcp_async(SERVER_IP, SERVER_PORT);
@@ -109,39 +138,39 @@ int main(void)
       if (tcp_st == 1)
       {
         tcp_async_started = 0;
-        display_update_debug("TCP Connect OK");
+        display_update_debug("TCP连接成功");
       }
       else if (tcp_st == -1)
       {
         tcp_async_started = 0;
         /* 连接失败，5 秒后允许重试 */
-        last_tcp_try_tick = HAL_GetTick();
-        display_update_debug("TCP Connect Fail");
+        last_tcp_try_tick = current_time;
+        display_update_debug("TCP连接失败");
       }
     }
 
-    /* TCP 已连接时定期发送心跳，保持链路活性 */
-    if (wifi_st == ESP8266_STATUS_TCP_CONNECTED &&
-        (HAL_GetTick() - last_hb_tick) >= HEARTBEAT_INTERVAL_MS)
-    {
-      esp8266_tcp_send_heartbeat();
-      last_hb_tick = HAL_GetTick();
-    }
+    /* 麦克风轮询处理 */
+    microphone_poll();
+
+    /* 系统控制器轮询处理 */
+    system_controller_poll();
 
     /* 刷新调试信息（变化时更新） */
     const char *dbg = esp8266_get_debug_msg();
-    if (dbg && strcmp(dbg, last_debug) != 0)
-    {
-      strncpy(last_debug, dbg, sizeof(last_debug) - 1);
-      last_debug[sizeof(last_debug) - 1] = '\0';
+    if (dbg && dbg[0] != '\0') {
       display_update_debug(dbg);
     }
 
-    /* 按键变化时刷新显示 */
-    if (bsp_key_k1_changed())
-      display_update_key1(bsp_key_get_k1());
-    if (bsp_key_k2_changed())
-      display_update_key2(bsp_key_get_k2());
+    /* 按钮状态调试（临时） */
+    static uint32_t last_btn_debug = 0;
+    if (current_time - last_btn_debug >= 1000) { /* 每秒更新一次 */
+        uint8_t k1_state = bsp_key_get_k1();
+        uint8_t k2_state = bsp_key_get_k2();
+        char btn_info[32];
+        snprintf(btn_info, sizeof(btn_info), "K1:%d K2:%d", k1_state, k2_state);
+        display_update_debug(btn_info);
+        last_btn_debug = current_time;
+    }
 
     HAL_Delay(50);
   }

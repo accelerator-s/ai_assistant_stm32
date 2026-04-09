@@ -5,7 +5,7 @@
             "label": "Build STM32 Project",
             "command": "make",
             "args": [
-                "-j$(nproc)"
+                "-j${command:cmake.maxNumberOfJobs}"
             ],
             "options": {
                 "cwd": "${workspaceFolder}"
@@ -18,6 +18,29 @@
                 "isDefault": false
             },
             "detail": "使用 Makefile 构建 STM32 项目"
+        },
+        {
+            "type": "shell",
+            "label": "Build STM32 Project (Windows)",
+            "command": "make",
+            "args": [
+                "-j${command:cmake.maxNumberOfJobs}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "shell": {
+                    "executable": "cmd.exe",
+                    "args": ["/d", "/c"]
+                }
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "detail": "Windows CMD下使用 Makefile 构建 STM32 项目"
         },
         {
             "type": "shell",
@@ -34,8 +57,8 @@
         },
         {
             "type": "cppbuild",
-            "label": "C/C++: arm-none-eabi-gcc 生成活动文件",
-            "command": "/usr/bin/arm-none-eabi-gcc",
+            "label": "C/C++: arm-none-eabi-gcc 生成活动文件 (Windows)",
+            "command": "arm-none-eabi-gcc",
             "args": [
                 "-fdiagnostics-color=always",
                 "-g",
@@ -55,7 +78,32 @@
                 "kind": "build",
                 "isDefault": true
             },
-            "detail": "调试器生成的任务。"
+            "detail": "Windows下调试器生成的任务。"
+        },
+        {
+            "type": "cppbuild",
+            "label": "C/C++: arm-none-eabi-gcc 生成活动文件 (Linux/macOS)",
+            "command": "/usr/bin/arm-none-eabi-gcc",
+            "args": [
+                "-fdiagnostics-color=always",
+                "-g",
+                "${file}",
+                "-o",
+                "${fileDirname}/${fileBasenameNoExtension}",
+                "-mcpu=cortex-m3",
+                "-mthumb"
+            ],
+            "options": {
+                "cwd": "${fileDirname}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "detail": "Linux/macOS下调试器生成的任务。"
         }
     ],
     "version": "2.0.0"

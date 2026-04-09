@@ -74,12 +74,28 @@ void display_update_ip(const char *ip)
         lcd_draw_string(56, 172, "--", COLOR_GRAY, COLOR_BLACK);
 }
 
-void display_update_key1(uint8_t pressed)
+void display_update_key1(uint8_t state)
 {
-    if (pressed)
-        lcd_draw_string_cn(56, 202, "按下  ", COLOR_GREEN, COLOR_BLACK);
-    else
-        lcd_draw_string_cn(56, 202, "松开  ", COLOR_RED, COLOR_BLACK);
+    switch (state) {
+        case 0: /* 松开 */
+            lcd_draw_string_cn(56, 202, "松开  ", COLOR_RED, COLOR_BLACK);
+            break;
+        case 1: /* 按下 */
+            lcd_draw_string_cn(56, 202, "按下  ", COLOR_GREEN, COLOR_BLACK);
+            break;
+        case 2: /* 录音中 */
+            lcd_draw_string_cn(56, 202, "录音中", COLOR_BLUE, COLOR_BLACK);
+            break;
+        case 3: /* 录音暂停 */
+            lcd_draw_string_cn(56, 202, "已暂停", COLOR_YELLOW, COLOR_BLACK);
+            break;
+        case 4: /* 错误 */
+            lcd_draw_string_cn(56, 202, "错误  ", COLOR_MAGENTA, COLOR_BLACK);
+            break;
+        default:
+            lcd_draw_string_cn(56, 202, "未知  ", COLOR_WHITE, COLOR_BLACK);
+            break;
+    }
 }
 
 void display_update_key2(uint8_t pressed)
@@ -88,6 +104,22 @@ void display_update_key2(uint8_t pressed)
         lcd_draw_string_cn(56, 222, "按下  ", COLOR_GREEN, COLOR_BLACK);
     else
         lcd_draw_string_cn(56, 222, "松开  ", COLOR_RED, COLOR_BLACK);
+}
+
+/* 刷新 K1 按键文本（直接显示字符串） */
+void display_update_key1_str(const char *text)
+{
+    lcd_fill_rect(56, 202, LCD_WIDTH - 56, 16, COLOR_BLACK);
+    if (text && text[0] != '\0')
+        lcd_draw_string_cn(56, 202, text, COLOR_WHITE, COLOR_BLACK);
+}
+
+/* 刷新 K2 按键文本（直接显示字符串） */
+void display_update_key2_str(const char *text)
+{
+    lcd_fill_rect(56, 222, LCD_WIDTH - 56, 16, COLOR_BLACK);
+    if (text && text[0] != '\0')
+        lcd_draw_string_cn(56, 222, text, COLOR_WHITE, COLOR_BLACK);
 }
 
 void display_update_debug(const char *text)

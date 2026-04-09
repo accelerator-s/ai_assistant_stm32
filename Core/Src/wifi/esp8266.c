@@ -19,6 +19,7 @@ static UART_HandleTypeDef huart_esp8266;
 /* 接收缓冲区 */
 static uint8_t rx_ring_buf[ESP8266_RX_BUF_SIZE];
 static volatile uint16_t rx_write_idx;
+static volatile uint16_t rx_read_idx;
 
 /* 单字节接收缓存，中断逐字节接收 */
 static uint8_t rx_byte;
@@ -192,6 +193,7 @@ static void esp8266_uart_init(void)
 
     /* 启动首次中断接收 */
     rx_write_idx = 0;
+    rx_read_idx = 0;
     HAL_UART_Receive_IT(&huart_esp8266, &rx_byte, 1);
 }
 
@@ -1033,4 +1035,42 @@ int esp8266_tcp_send(const uint8_t *data, uint16_t len)
         HAL_Delay(20);
     }
     return -1;
+}
+
+/* 检查是否有TCP数据可读 */
+uint16_t esp8266_tcp_data_available(void)
+{
+    if (rx_write_idx >= rx_read_idx) {
+        return rx_write_idx - rx_read_idx;
+    } else {
+        return (ESP8266_RX_BUF_SIZE - rx_read_idx) + rx_write_idx;
+    }
+}
+
+/* 读取TCP数据 */
+uint16_t esp8266_tcp_read(uint8_t *buffer, uint16_t max_len)
+{
+    if (buffer == NULL || max_len == 0) {
+        return 0;
+    }
+
+    uint16_t available = esp8266_tcp_data_available();
+    if (available == 0) {
+        return 0;
+    }
+
+    uint16_t to_read = (available < max_len) ? available : max_len;
+    uint16_t read_count = 0;
+
+    while (read_count < to_read) {
+        buffer[read_count] = rx_ring_buf[rx_read_idx];
+        read_count++;
+
+        rx_read_idx++;
+        if (rx_read_idx >= ESP8266_RX_BUF_SIZE) {
+            rx_read_idx = 0;
+        }
+    }
+
+    return read_count;
 }

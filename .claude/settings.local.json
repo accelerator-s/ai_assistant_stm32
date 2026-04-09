@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs grep:*)",
+      "Bash(.venvScriptsActivate.ps1)",
+      "Bash(make clean:*)",
+      "Bash(make)",
+      "Bash(python -c \"import sys; print\\(''Python路径正常''\\); print\\(''当前目录:'', sys.path[0]\\)\")",
+      "Bash(find E:stm32ai_assistant_stm32 -name *cmsis*dsp* -o -name *arm_math*)"
+    ]
+  }
+}
