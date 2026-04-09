@@ -6,7 +6,9 @@
       "Bash(make clean:*)",
       "Bash(make)",
       "Bash(python -c \"import sys; print\\(''Python路径正常''\\); print\\(''当前目录:'', sys.path[0]\\)\")",
-      "Bash(find E:stm32ai_assistant_stm32 -name *cmsis*dsp* -o -name *arm_math*)"
+      "Bash(find E:stm32ai_assistant_stm32 -name *cmsis*dsp* -o -name *arm_math*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)"
     ]
   }
 }
