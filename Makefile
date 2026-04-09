@@ -61,7 +61,9 @@ Core/Src/lcd/display.c \
 Core/Src/bsp/bsp_key.c \
 Core/Src/bsp/bsp_spi_flash.c \
 Core/Src/wifi/esp8266.c \
-Core/Src/debug/debug_uart.c
+Core/Src/debug/debug_uart.c \
+Core/Src/audio/i2s_mic.c \
+Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_i2s.c
 
 # ASM sources
 ASM_SOURCES =  \
@@ -127,6 +129,7 @@ C_INCLUDES =  \
 -ICore/Inc/lcd \
 -ICore/Inc/wifi \
 -ICore/Inc/debug \
+-ICore/Inc/audio \
 -IDrivers/STM32F1xx_HAL_Driver/Inc/Legacy \
 -IDrivers/STM32F1xx_HAL_Driver/Inc \
 -IDrivers/CMSIS/Device/ST/STM32F1xx/Include \

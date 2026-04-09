@@ -188,7 +188,8 @@ static void ili9341_init_reg(void)
 
     /* 扫描方向: 正常显示
      * MADCTL = 0x08
-     * MY=0, MX=0, MV=0, BGR=1 */
+     * MY=0, MX=0, MV=0, BGR=1
+     * 恢复面板实际需要的 BGR 颜色顺序，确保红色文字显示为红色 */
     LCD_WR_CMD(0x36);
     LCD_WR_DAT(0x08);
 
@@ -401,3 +402,243 @@ void lcd_backlight(uint8_t on)
     HAL_GPIO_WritePin(LCD_BL_PORT, LCD_BL_PIN,
                       on ? GPIO_PIN_RESET : GPIO_PIN_SET);
 }
+
+/* ===================== 扩展绘图函数 ===================== */
+
+/* 画水平线 */
+void lcd_draw_hline(uint16_t x, uint16_t y, uint16_t len, uint16_t color)
+{
+    if (y >= LCD_HEIGHT || x >= LCD_WIDTH)
+        return;
+    if (x + len > LCD_WIDTH)
+        len = LCD_WIDTH - x;
+    lcd_fill_rect(x, y, len, 1, color);
+}
+
+/* 画垂直线 */
+void lcd_draw_vline(uint16_t x, uint16_t y, uint16_t len, uint16_t color)
+{
+    if (x >= LCD_WIDTH || y >= LCD_HEIGHT)
+        return;
+    if (y + len > LCD_HEIGHT)
+        len = LCD_HEIGHT - y;
+    lcd_fill_rect(x, y, 1, len, color);
+}
+
+/* 画圆（Bresenham 中点画圆） */
+void lcd_draw_circle(uint16_t cx, uint16_t cy, uint16_t r, uint16_t color)
+{
+    int16_t x = 0, y = (int16_t)r;
+    int16_t d = 1 - (int16_t)r;
+
+    while (x <= y)
+    {
+        lcd_draw_pixel(cx + x, cy + y, color);
+        lcd_draw_pixel(cx - x, cy + y, color);
+        lcd_draw_pixel(cx + x, cy - y, color);
+        lcd_draw_pixel(cx - x, cy - y, color);
+        lcd_draw_pixel(cx + y, cy + x, color);
+        lcd_draw_pixel(cx - y, cy + x, color);
+        lcd_draw_pixel(cx + y, cy - x, color);
+        lcd_draw_pixel(cx - y, cy - x, color);
+        if (d < 0)
+        {
+            d += 2 * x + 3;
+        }
+        else
+        {
+            d += 2 * (x - y) + 5;
+            y--;
+        }
+        x++;
+    }
+}
+
+/* 画填充圆 */
+void lcd_fill_circle(uint16_t cx, uint16_t cy, uint16_t r, uint16_t color)
+{
+    int16_t x = 0, y = (int16_t)r;
+    int16_t d = 1 - (int16_t)r;
+
+    while (x <= y)
+    {
+        /* 水平填充对称的两段 */
+        lcd_draw_hline(cx - x, cy + y, 2 * x + 1, color);
+        lcd_draw_hline(cx - x, cy - y, 2 * x + 1, color);
+        lcd_draw_hline(cx - y, cy + x, 2 * y + 1, color);
+        lcd_draw_hline(cx - y, cy - x, 2 * y + 1, color);
+        if (d < 0)
+        {
+            d += 2 * x + 3;
+        }
+        else
+        {
+            d += 2 * (x - y) + 5;
+            y--;
+        }
+        x++;
+    }
+}
+
+/* 画填充圆角矩形 */
+void lcd_fill_rounded_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                           uint16_t r, uint16_t color)
+{
+    if (r > w / 2) r = w / 2;
+    if (r > h / 2) r = h / 2;
+
+    /* 中央大矩形（去除四角） */
+    lcd_fill_rect(x + r, y, w - 2 * r, h, color);
+
+    /* 左右两侧矩形（去除圆角部分） */
+    lcd_fill_rect(x, y + r, r, h - 2 * r, color);
+    lcd_fill_rect(x + w - r, y + r, r, h - 2 * r, color);
+
+    /* 四个圆角 */
+    int16_t cx, cy, px = 0, py = (int16_t)r;
+    int16_t d = 1 - (int16_t)r;
+
+    while (px <= py)
+    {
+        /* 左上角 */
+        cx = x + r;
+        cy = y + r;
+        lcd_draw_hline(cx - px, cy - py, px + 1, color);
+        lcd_draw_hline(cx - py, cy - px, py + 1, color);
+
+        /* 右上角 */
+        cx = x + w - r - 1;
+        lcd_draw_hline(cx, cy - py, px + 1, color);
+        lcd_draw_hline(cx, cy - px, py + 1, color);
+
+        /* 左下角 */
+        cy = y + h - r - 1;
+        cx = x + r;
+        lcd_draw_hline(cx - px, cy + py, px + 1, color);
+        lcd_draw_hline(cx - py, cy + px, py + 1, color);
+
+        /* 右下角 */
+        cx = x + w - r - 1;
+        lcd_draw_hline(cx, cy + py, px + 1, color);
+        lcd_draw_hline(cx, cy + px, py + 1, color);
+
+        if (d < 0)
+        {
+            d += 2 * px + 3;
+        }
+        else
+        {
+            d += 2 * (px - py) + 5;
+            py--;
+        }
+        px++;
+    }
+}
+
+/* 画圆角矩形边框 */
+void lcd_draw_rounded_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                           uint16_t r, uint16_t color)
+{
+    if (r > w / 2) r = w / 2;
+    if (r > h / 2) r = h / 2;
+
+    /* 四条直线 */
+    lcd_draw_hline(x + r, y, w - 2 * r, color);
+    lcd_draw_hline(x + r, y + h - 1, w - 2 * r, color);
+    lcd_draw_vline(x, y + r, h - 2 * r, color);
+    lcd_draw_vline(x + w - 1, y + r, h - 2 * r, color);
+
+    /* 四个圆角弧线 */
+    int16_t cx, cy, px = 0, py = (int16_t)r;
+    int16_t d = 1 - (int16_t)r;
+
+    while (px <= py)
+    {
+        /* 左上 */
+        cx = x + r;  cy = y + r;
+        lcd_draw_pixel(cx - px, cy - py, color);
+        lcd_draw_pixel(cx - py, cy - px, color);
+        /* 右上 */
+        cx = x + w - 1 - r;
+        lcd_draw_pixel(cx + px, cy - py, color);
+        lcd_draw_pixel(cx + py, cy - px, color);
+        /* 左下 */
+        cx = x + r;  cy = y + h - 1 - r;
+        lcd_draw_pixel(cx - px, cy + py, color);
+        lcd_draw_pixel(cx - py, cy + px, color);
+        /* 右下 */
+        cx = x + w - 1 - r;
+        lcd_draw_pixel(cx + px, cy + py, color);
+        lcd_draw_pixel(cx + py, cy + px, color);
+
+        if (d < 0)
+        {
+            d += 2 * px + 3;
+        }
+        else
+        {
+            d += 2 * (px - py) + 5;
+            py--;
+        }
+        px++;
+    }
+}
+
+/* 在限定矩形区域内绘制中英文混排字符串，自动换行，返回实际绘制总高度 */
+uint16_t lcd_draw_text_wrap(uint16_t x, uint16_t y, uint16_t max_w, uint16_t max_h,
+                            const char *str, uint16_t fg, uint16_t bg)
+{
+    uint16_t cx = x;
+    uint16_t cy = y;
+
+    while (*str)
+    {
+        /* 超出最大高度则停止 */
+        if (cy + CN_CHAR_HEIGHT > y + max_h)
+            break;
+
+        if ((uint8_t)*str <= 0x7E)
+        {
+            /* ASCII 字符 */
+            if (cx + FONT_W > x + max_w)
+            {
+                cx = x;
+                cy += CN_CHAR_HEIGHT;
+            }
+            if (cy + CN_CHAR_HEIGHT > y + max_h)
+                break;
+
+            /* 换行符特殊处理 */
+            if (*str == '\n')
+            {
+                cx = x;
+                cy += CN_CHAR_HEIGHT;
+                str++;
+                continue;
+            }
+
+            lcd_draw_char(cx, cy, *str, fg, bg);
+            cx += FONT_W;
+            str++;
+        }
+        else
+        {
+            /* GBK 中文字符（双字节） */
+            if (cx + CN_CHAR_WIDTH > x + max_w)
+            {
+                cx = x;
+                cy += CN_CHAR_HEIGHT;
+            }
+            if (cy + CN_CHAR_HEIGHT > y + max_h)
+                break;
+
+            uint16_t ch = ((uint8_t)str[0] << 8) | (uint8_t)str[1];
+            lcd_draw_char_cn(cx, cy, ch, fg, bg);
+            cx += CN_CHAR_WIDTH;
+            str += 2;
+        }
+    }
+
+    return (cy - y) + CN_CHAR_HEIGHT;
+}
+

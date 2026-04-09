@@ -49,6 +49,15 @@ CREATE TABLE IF NOT EXISTS ip_bans (
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_device  ON sessions(device_id);
 CREATE INDEX IF NOT EXISTS idx_ip_bans_ip       ON ip_bans(ip_address);
+
+CREATE TABLE IF NOT EXISTS user_settings (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    username        TEXT    NOT NULL DEFAULT 'User',
+    avatar          TEXT    NOT NULL DEFAULT '',
+    updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+INSERT OR IGNORE INTO user_settings (id, username, avatar) VALUES (1, 'User', '');
 """
 
 
@@ -66,13 +75,14 @@ class DatabaseManager:
     # ------------------------------------------------------------------
     def _get_conn(self) -> sqlite3.Connection:
         """每个线程维护独立连接"""
-        if not hasattr(self._local, "conn") or self._local.conn is None:
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
             conn = sqlite3.connect(str(self._path), check_same_thread=False)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
-            self._local.conn = conn
-        return self._local.conn
+            setattr(self._local, "conn", conn)
+        return conn
 
     @contextmanager
     def cursor(self):
@@ -194,7 +204,7 @@ class DatabaseManager:
                 "UPDATE sessions SET updated_at = datetime('now') WHERE id = ?",
                 (session_id,),
             )
-            return cur.lastrowid
+            return cur.lastrowid or 0
 
     def get_messages(self, session_id: str, limit: int = 100) -> list[dict]:
         """查询会话消息"""
@@ -236,3 +246,23 @@ class DatabaseManager:
         """解除 IP 封禁"""
         with self.cursor() as cur:
             cur.execute("DELETE FROM ip_bans WHERE ip_address = ?", (ip,))
+
+    # ------------------------------------------------------------------
+    # 用户个性化设置
+    # ------------------------------------------------------------------
+    def get_user_settings(self) -> dict:
+        """查询用户设置"""
+        with self.cursor() as cur:
+            cur.execute("SELECT username, avatar FROM user_settings WHERE id = 1")
+            row = cur.fetchone()
+            if row:
+                return dict(row)
+            return {"username": "User", "avatar": ""}
+
+    def save_user_settings(self, username: str, avatar: str) -> None:
+        """保存用户设置"""
+        with self.cursor() as cur:
+            cur.execute(
+                "UPDATE user_settings SET username = ?, avatar = ?, updated_at = datetime('now') WHERE id = 1",
+                (username, avatar)
+            )

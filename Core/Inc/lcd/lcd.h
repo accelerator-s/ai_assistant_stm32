@@ -26,11 +26,13 @@
 #define LCD_WIDTH 240
 #define LCD_HEIGHT 320
 
-/* RGB565 常用颜色 */
+/* ===================== RGB565 颜色定义 ===================== */
+
+/* 基础颜色 */
 #define COLOR_BLACK 0x0000u
 #define COLOR_WHITE 0xFFFFu
-#define COLOR_RED 0xF800u
-#define COLOR_GREEN 0x07E0u
+#define COLOR_RED 0x07E0u
+#define COLOR_GREEN 0xF800u
 #define COLOR_BLUE 0x001Fu
 #define COLOR_YELLOW 0xFFE0u
 #define COLOR_CYAN 0x07FFu
@@ -38,7 +40,24 @@
 #define COLOR_ORANGE 0xFD20u
 #define COLOR_GRAY 0x8410u
 
-/* 函数声明 */
+/* ChatGPT 风格深色主题配色 */
+#define COLOR_BG_DARK 0x2104u        /* #212121 深灰背景 */
+#define COLOR_BG_SIDEBAR 0x18E3u     /* #171717 侧边栏深灰 */
+#define COLOR_BG_BUBBLE_USR 0x39E7u  /* #3a3a3a 用户消息气泡 */
+#define COLOR_BG_BUBBLE_AI 0x2945u   /* #2b2b2b AI消息气泡 */
+#define COLOR_BG_STATUS 0x10A2u      /* #111111 状态栏 */
+#define COLOR_BG_INPUT 0x31A6u       /* #333333 输入区背景 */
+#define COLOR_ACCENT_GREEN 0xD174u   /* 面板校正后的绿色强调色 */
+#define COLOR_ACCENT_TEAL 0x1E9Fu    /* #1abc9c 青绿强调 */
+#define COLOR_TEXT_PRIMARY 0xEF7Du   /* #ececec 主文字 */
+#define COLOR_TEXT_SECONDARY 0x9CF3u /* #9a9a9a 次要文字 */
+#define COLOR_TEXT_DIM 0x6B6Du       /* #6b6b6b 暗淡文字 */
+#define COLOR_DIVIDER 0x2945u        /* #2b2b2b 分割线 */
+#define COLOR_ICON_MIC 0x46DFu       /* 面板校正后的偏红色麦克风 */
+#define COLOR_RECORDING 0x07E0u      /* 面板校正后的红色录音指示 */
+
+/* ===================== 基础绘图函数 ===================== */
+
 void lcd_init(void);
 void lcd_clear(uint16_t color);
 void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1);
@@ -49,5 +68,31 @@ void lcd_draw_string(uint16_t x, uint16_t y, const char *str, uint16_t fg, uint1
 void lcd_draw_char_cn(uint16_t x, uint16_t y, uint16_t gbk_code, uint16_t fg, uint16_t bg);
 void lcd_draw_string_cn(uint16_t x, uint16_t y, const char *str, uint16_t fg, uint16_t bg);
 void lcd_backlight(uint8_t on);
+
+/* ===================== 扩展绘图函数 ===================== */
+
+/* 画水平线 */
+void lcd_draw_hline(uint16_t x, uint16_t y, uint16_t len, uint16_t color);
+
+/* 画垂直线 */
+void lcd_draw_vline(uint16_t x, uint16_t y, uint16_t len, uint16_t color);
+
+/* 画圆（Bresenham 算法） */
+void lcd_draw_circle(uint16_t cx, uint16_t cy, uint16_t r, uint16_t color);
+
+/* 画填充圆 */
+void lcd_fill_circle(uint16_t cx, uint16_t cy, uint16_t r, uint16_t color);
+
+/* 画圆角矩形（仅边框） */
+void lcd_draw_rounded_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                           uint16_t r, uint16_t color);
+
+/* 画填充圆角矩形 */
+void lcd_fill_rounded_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                           uint16_t r, uint16_t color);
+
+/* 在指定矩形区域内绘制中英文混排字符串，自动换行，返回实际绘制行高 */
+uint16_t lcd_draw_text_wrap(uint16_t x, uint16_t y, uint16_t max_w, uint16_t max_h,
+                            const char *str, uint16_t fg, uint16_t bg);
 
 #endif /* __LCD_H */

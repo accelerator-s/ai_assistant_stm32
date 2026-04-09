@@ -1,15 +1,26 @@
 /**
  * @file  esp8266.c
- * @brief ESP8266 WiFi 模块驱动实现（增强版）
- *        - 启动时发送 AT+RST 硬复位，确保模块处于已知状态
- *        - 兼容新旧两版 AT 固件（AT+CWJAP / AT+CWJAP_DEF）
- *        - 兼容新旧两版 AT+CIFSR 响应格式
- *        - 非阻塞状态机，主循环调用 esp8266_poll() 驱动
+ * @brief ESP8266 WiFi 模块驱动实现（队列式全异步非阻塞版本）
+ *
+ * 设计目标:
+ *   1. 不对上层暴露阻塞式 TCP 发送接口
+ *   2. 所有 TCP 发送都先进入发送队列，再由状态机逐步推进
+ *   3. 主循环仅通过 esp8266_poll() 驱动，不依赖 HAL_Delay 忙等
+ *   4. 保留 WiFi/TCP 自动连接、心跳、断链检测、文本下行解析能力
+ *
+ * 注意:
+ *   - 本实现仍允许硬件上电/复位阶段存在最小必要的时序等待，但不会在业务收发路径阻塞
+ *   - 发送事务为“单飞”模型：同一时刻只推进一个 AT+CIPSEND 事务
  */
+
 #include "wifi/esp8266.h"
 #include "wifi/wifi_config.h"
-#include <string.h>
+#include "debug/debug_uart.h"
+
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 /* ==================== 私有变量 ==================== */
 
@@ -23,8 +34,16 @@ static volatile uint16_t rx_write_idx;
 /* 单字节接收缓存，中断逐字节接收 */
 static uint8_t rx_byte;
 
+/* UART 发送完成标志：所有异步发送动作都必须等上一次真正发完 */
+static volatile uint8_t s_uart_tx_busy = 0u;
+
+/* 持久化 UART 发送缓冲区，避免 HAL_UART_Transmit_IT 使用栈内存 */
+static uint8_t s_uart_tx_buf[ESP8266_MAX_TX_PAYLOAD + 8u];
+static uint16_t s_uart_tx_len = 0u;
+
 /* 线性应答缓冲区，用于解析 AT 响应 */
 static char resp_buf[ESP8266_RX_BUF_SIZE];
+static uint16_t s_tcp_parse_offset;
 
 /* 模块对外状态 */
 static esp8266_status_t s_status = ESP8266_STATUS_IDLE;
@@ -35,76 +54,71 @@ static char s_ip_addr[20];
 /* 调试信息：最后一次关键事件描述（用于 LCD 显示） */
 static char s_debug_msg[64];
 
-/* ==================== 非阻塞状态机 ==================== */
+/* ==================== 初始化状态机 ==================== */
 
-/* 内部初始化阶段 */
 typedef enum
 {
-    INIT_POWERON,   /* 等待上电稳定 */
-    INIT_RST_SEND,  /* 发送 AT+RST 复位 */
-    INIT_RST_WAIT,  /* 等待复位完成 */
-    INIT_AT_SEND,   /* 发送 AT 握手 */
-    INIT_AT_WAIT,   /* 等待 AT 响应 */
-    INIT_ATE0_SEND, /* 发送关回显 */
+    INIT_POWERON = 0, /* 等待上电稳定 */
+    INIT_RST_ASSERT,  /* RST 拉低 */
+    INIT_RST_RELEASE, /* RST 拉高 */
+    INIT_RST_WAIT,    /* 等待 ready */
+    INIT_AT_SEND,     /* 发送 AT */
+    INIT_AT_WAIT,     /* 等待 AT 响应 */
+    INIT_ATE0_SEND,   /* 发送关回显 */
     INIT_ATE0_WAIT,
     INIT_CWMODE_SEND, /* 设置 Station 模式 */
     INIT_CWMODE_WAIT,
-    INIT_UART_DEF_SEND, /* 将 ESP8266 波特率切换到 115200 */
+    INIT_UART_DEF_SEND, /* 切换 ESP8266 到目标波特率 */
     INIT_UART_DEF_WAIT,
-    INIT_CWJAP_SEND, /* 连接 WiFi 热点 */
+    INIT_UART_SWITCH_WAIT, /* 等待本地切换波特率 */
+    INIT_CWJAP_SEND,       /* 连接 WiFi */
     INIT_CWJAP_WAIT,
-    INIT_CIFSR_SEND, /* 查询 IP 地址 */
+    INIT_CIFSR_SEND, /* 查询 IP */
     INIT_CIFSR_WAIT,
-    INIT_COMPLETE, /* 初始化完成 */
-    INIT_FAIL,     /* 初始化失败 */
+    INIT_COMPLETE,
+    INIT_FAIL
 } init_phase_t;
 
 static init_phase_t s_phase = INIT_POWERON;
-static uint32_t s_phase_tick;   /* 进入当前阶段的时间戳 */
-static uint8_t s_retry_count;   /* 当前阶段的重试计数 */
-static uint8_t s_use_cwjap_def; /* 非零表示使用旧版 AT+CWJAP_DEF 指令 */
+static uint32_t s_phase_tick;
+static uint8_t s_retry_count;
+static uint8_t s_use_cwjap_def;
 
-/* 自动波特率探测：依次尝试的波特率列表 */
-static const uint32_t s_baud_table[] = {115200, 9600, 57600};
+/* 自动波特率探测: 优先 115200，兼容 ESP8266 Flash 中可能残留的 460800 */
+static const uint32_t s_baud_table[] = {115200u, 460800u, 9600u, 57600u};
 #define BAUD_TABLE_SIZE (sizeof(s_baud_table) / sizeof(s_baud_table[0]))
-static uint8_t s_baud_idx; /* 当前正在尝试的波特率索引 */
+static uint8_t s_baud_idx;
 
-/* 每个波特率最多重试 AT 次数 */
-#define AT_PER_BAUD_RETRIES 3
-#define AT_TEST_TIMEOUT 1000
+/* 时序常量 */
+#define AT_PER_BAUD_RETRIES 3u
+#define AT_TEST_TIMEOUT 1000u
+#define AT_CMD_TIMEOUT 3000u
+#define RST_TIMEOUT 5000u
+#define CWJAP_TIMEOUT 20000u
+#define CWJAP_RETRIES 3u
+#define POWERON_DELAY 2000u
+#define HW_RST_LOW_MS 200u
+#define HW_RST_POST_MS 50u
+#define UART_SWITCH_DELAY_MS 100u
+#define TCP_CONNECT_TIMEOUT 10000u
 
-/* 常规 AT 指令超时 */
-#define AT_CMD_TIMEOUT 3000
-
-/* 复位后等待 "ready" 的超时 */
-#define RST_TIMEOUT 5000
-
-/* WiFi 连接超时 20 秒，最多重试 3 次 */
-#define CWJAP_TIMEOUT 20000
-#define CWJAP_RETRIES 3
-
-/* 上电等待时间 */
-#define POWERON_DELAY 2000
-
-/* TCP 建连等待超时（服务器忙/网络抖动时 3s 偏短，容易误判失败） */
-#define TCP_CONNECT_TIMEOUT 10000
-
-/* ==================== TCP 非阻塞状态机 ==================== */
+/* ==================== TCP 连接状态机 ==================== */
 
 typedef enum
 {
-    TCP_PHASE_IDLE = 0,      /* 空闲，未启动连接 */
-    TCP_PHASE_CIPMUX_SEND,   /* 发送 AT+CIPMUX=0 */
-    TCP_PHASE_CIPMUX_WAIT,   /* 等待 CIPMUX 响应 */
-    TCP_PHASE_CIPSTART_SEND, /* 发送 AT+CIPSTART */
-    TCP_PHASE_CIPSTART_WAIT, /* 等待 CONNECT 或错误 */
-    TCP_PHASE_DONE_OK,       /* 连接成功（等待主循环读取） */
-    TCP_PHASE_DONE_FAIL,     /* 连接失败（等待主循环读取） */
-    /* 心跳发送阶段（非阻塞） */
-    TCP_PHASE_HB_CIPSEND,     /* 发送 AT+CIPSEND=3 */
-    TCP_PHASE_HB_PROMPT_WAIT, /* 等待 > 提示符 */
-    TCP_PHASE_HB_DATA,        /* 发送心跳数据 "HB\n" */
-    TCP_PHASE_HB_ACK_WAIT,    /* 等待 SEND OK 确认 */
+    TCP_PHASE_IDLE = 0,
+    TCP_PHASE_CIPMUX_SEND,
+    TCP_PHASE_CIPMUX_WAIT,
+    TCP_PHASE_CIPSTART_SEND,
+    TCP_PHASE_CIPSTART_WAIT,
+    TCP_PHASE_DONE_OK,
+    TCP_PHASE_DONE_FAIL,
+    TCP_PHASE_HB_CIPSEND,
+    TCP_PHASE_HB_PROMPT_WAIT,
+    TCP_PHASE_HB_DATA,
+    TCP_PHASE_HB_ACK_WAIT,
+    TCP_PHASE_CLOSE_SEND,
+    TCP_PHASE_CLOSE_WAIT
 } tcp_phase_t;
 
 static tcp_phase_t s_tcp_phase = TCP_PHASE_IDLE;
@@ -112,70 +126,249 @@ static uint32_t s_tcp_phase_tick;
 static char s_tcp_server_ip[20];
 static uint16_t s_tcp_server_port;
 
-/* ==================== 底层串口操作 ==================== */
+/* ==================== 发送队列与发送事务 ==================== */
 
-/* ==================== CH_PD / RST 引脚操作 ==================== */
+typedef enum
+{
+    TX_ENGINE_IDLE = 0,
+    TX_ENGINE_CIPSEND,
+    TX_ENGINE_PROMPT_WAIT,
+    TX_ENGINE_DATA_SEND,
+    TX_ENGINE_ACK_WAIT
+} tx_engine_phase_t;
 
-/**
- * @brief 初始化 ESP8266 的 CH_PD 和 RST 控制引脚
- *        CH_PD=PB8 高电平使能模块，RST=PB9 低电平复位
- */
+typedef struct
+{
+    uint8_t used;
+    esp8266_tx_item_t item;
+} tx_slot_t;
+
+static tx_slot_t s_tx_queue[ESP8266_TX_QUEUE_CAPACITY];
+static volatile uint16_t s_tx_head = 0;
+static volatile uint16_t s_tx_tail = 0;
+static volatile uint16_t s_tx_count = 0;
+
+static tx_engine_phase_t s_tx_phase = TX_ENGINE_IDLE;
+static uint32_t s_tx_phase_tick;
+static esp8266_tx_item_t s_tx_current;
+static uint8_t s_tx_has_current = 0;
+
+/* ==================== 工具函数 ==================== */
+
+static int esp8266_phase_timeout(uint32_t ms)
+{
+    return (HAL_GetTick() - s_phase_tick) >= ms;
+}
+
+static int esp8266_tcp_phase_timeout(uint32_t ms)
+{
+    return (HAL_GetTick() - s_tcp_phase_tick) >= ms;
+}
+
+static int esp8266_tx_phase_timeout(uint32_t ms)
+{
+    return (HAL_GetTick() - s_tx_phase_tick) >= ms;
+}
+
+static void esp8266_set_phase(init_phase_t phase)
+{
+    s_phase = phase;
+    s_phase_tick = HAL_GetTick();
+}
+
+static void esp8266_set_tcp_phase(tcp_phase_t phase)
+{
+    s_tcp_phase = phase;
+    s_tcp_phase_tick = HAL_GetTick();
+}
+
+static void esp8266_set_tx_phase(tx_engine_phase_t phase)
+{
+    s_tx_phase = phase;
+    s_tx_phase_tick = HAL_GetTick();
+}
+
+static void esp8266_save_debug(const char *msg)
+{
+    if (!msg)
+    {
+        s_debug_msg[0] = '\0';
+        return;
+    }
+    strncpy(s_debug_msg, msg, sizeof(s_debug_msg) - 1);
+    s_debug_msg[sizeof(s_debug_msg) - 1] = '\0';
+}
+
+static void esp8266_clear_rx(void)
+{
+    __disable_irq();
+    rx_write_idx = 0;
+    memset(rx_ring_buf, 0, sizeof(rx_ring_buf));
+    s_tcp_parse_offset = 0;
+    __enable_irq();
+}
+
+static uint16_t esp8266_snapshot_resp(void)
+{
+    uint16_t len;
+
+    __disable_irq();
+    len = rx_write_idx;
+    if (len > (sizeof(resp_buf) - 1u))
+        len = (uint16_t)(sizeof(resp_buf) - 1u);
+    memcpy(resp_buf, rx_ring_buf, len);
+    resp_buf[len] = '\0';
+    __enable_irq();
+
+    return len;
+}
+
+static int esp8266_check_resp(const char *keyword)
+{
+    esp8266_snapshot_resp();
+    return (strstr(resp_buf, keyword) != NULL) ? 1 : 0;
+}
+
+static int esp8266_uart_tx_ready(void)
+{
+    return (s_uart_tx_busy == 0u) &&
+           (huart_esp8266.gState == HAL_UART_STATE_READY);
+}
+
+static int esp8266_send_raw_buf(const uint8_t *data, uint16_t len)
+{
+    HAL_StatusTypeDef hal_ret;
+
+    if (!data || len == 0u)
+        return 0;
+
+    if (len > sizeof(s_uart_tx_buf))
+        return 0;
+
+    if (!esp8266_uart_tx_ready())
+        return 0;
+
+    memcpy(s_uart_tx_buf, data, len);
+    s_uart_tx_len = len;
+    s_uart_tx_busy = 1u;
+
+    hal_ret = HAL_UART_Transmit_IT(&huart_esp8266, s_uart_tx_buf, s_uart_tx_len);
+    if (hal_ret != HAL_OK)
+    {
+        s_uart_tx_busy = 0u;
+        s_uart_tx_len = 0u;
+        return 0;
+    }
+
+    return 1;
+}
+
+static int esp8266_send_raw_str(const char *str)
+{
+    if (!str)
+        return 0;
+    return esp8266_send_raw_buf((const uint8_t *)str, (uint16_t)strlen(str));
+}
+
+static int esp8266_send_cmd_now(const char *cmd)
+{
+    int n;
+
+    if (!cmd)
+        return 0;
+
+    if (!esp8266_uart_tx_ready())
+        return 0;
+
+    esp8266_clear_rx();
+    n = snprintf((char *)s_uart_tx_buf, sizeof(s_uart_tx_buf), "%s\r\n", cmd);
+    if (n <= 0 || (uint16_t)n >= sizeof(s_uart_tx_buf))
+        return 0;
+
+    s_uart_tx_len = (uint16_t)n;
+    s_uart_tx_busy = 1u;
+
+    if (HAL_UART_Transmit_IT(&huart_esp8266, s_uart_tx_buf, s_uart_tx_len) != HAL_OK)
+    {
+        s_uart_tx_busy = 0u;
+        s_uart_tx_len = 0u;
+        return 0;
+    }
+
+    return 1;
+}
+
+static void format_tx_item_payload(const esp8266_tx_item_t *item, uint8_t *out, uint16_t *out_len)
+{
+    uint16_t len = 0;
+
+    if (!item || !out || !out_len)
+        return;
+
+    if (item->kind == ESP8266_TX_KIND_TCP_RAW)
+    {
+        len = item->len;
+        memcpy(out, item->data, len);
+    }
+    else
+    {
+        len = item->len;
+        memcpy(out, item->data, len);
+
+        if (item->append_crlf)
+        {
+            if (item->kind == ESP8266_TX_KIND_AT_CMD)
+            {
+                out[len++] = '\r';
+                out[len++] = '\n';
+            }
+            else
+            {
+                out[len++] = '\n';
+            }
+        }
+    }
+
+    *out_len = len;
+}
+
+/* ==================== GPIO / UART 初始化 ==================== */
+
 static void esp8266_gpio_init(void)
 {
     GPIO_InitTypeDef gpio = {0};
+
     ESP8266_GPIO_CLK_ENABLE();
 
-    /* CH_PD — PB8 推挽输出 */
     gpio.Pin = ESP8266_CH_PD_PIN;
     gpio.Mode = GPIO_MODE_OUTPUT_PP;
     gpio.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(ESP8266_CH_PD_PORT, &gpio);
 
-    /* RST — PB9 推挽输出 */
     gpio.Pin = ESP8266_RST_PIN;
     HAL_GPIO_Init(ESP8266_RST_PORT, &gpio);
 
-    /* 先拉高 RST，再使能 CH_PD */
     HAL_GPIO_WritePin(ESP8266_RST_PORT, ESP8266_RST_PIN, GPIO_PIN_SET);
     HAL_GPIO_WritePin(ESP8266_CH_PD_PORT, ESP8266_CH_PD_PIN, GPIO_PIN_SET);
 }
 
-/**
- * @brief 硬件复位 ESP8266：RST 拉低 200ms 再拉高
- */
-static void esp8266_hw_reset(void)
-{
-    HAL_GPIO_WritePin(ESP8266_RST_PORT, ESP8266_RST_PIN, GPIO_PIN_RESET);
-    HAL_Delay(200);
-    HAL_GPIO_WritePin(ESP8266_RST_PORT, ESP8266_RST_PIN, GPIO_PIN_SET);
-}
-
-/* ==================== 底层串口操作 ==================== */
-
-/**
- * @brief 初始化 USART3 外设及对应 GPIO
- */
 static void esp8266_uart_init(void)
 {
     GPIO_InitTypeDef gpio = {0};
 
-    /* 使能时钟 */
     ESP8266_USART_CLK_ENABLE();
     ESP8266_GPIO_CLK_ENABLE();
 
-    /* TX — PB10 复用推挽 */
     gpio.Pin = ESP8266_TX_GPIO_PIN;
     gpio.Mode = GPIO_MODE_AF_PP;
     gpio.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(ESP8266_TX_GPIO_PORT, &gpio);
 
-    /* RX — PB11 浮空输入 */
     gpio.Pin = ESP8266_RX_GPIO_PIN;
     gpio.Mode = GPIO_MODE_INPUT;
     gpio.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(ESP8266_RX_GPIO_PORT, &gpio);
 
-    /* UART 参数: 115200, 8N1 */
     huart_esp8266.Instance = ESP8266_USART;
     huart_esp8266.Init.BaudRate = ESP8266_USART_BAUDRATE;
     huart_esp8266.Init.WordLength = UART_WORDLENGTH_8B;
@@ -186,41 +379,31 @@ static void esp8266_uart_init(void)
     huart_esp8266.Init.OverSampling = UART_OVERSAMPLING_16;
     HAL_UART_Init(&huart_esp8266);
 
-    /* USART3 中断优先级 */
     HAL_NVIC_SetPriority(ESP8266_USART_IRQn, 1, 0);
     HAL_NVIC_EnableIRQ(ESP8266_USART_IRQn);
 
-    /* 启动首次中断接收 */
     rx_write_idx = 0;
     HAL_UART_Receive_IT(&huart_esp8266, &rx_byte, 1);
 }
 
-/**
- * @brief 动态切换 USART3 波特率（用于自动探测）
- */
 static void esp8266_uart_set_baud(uint32_t baud)
 {
     HAL_UART_Abort(&huart_esp8266);
     huart_esp8266.Init.BaudRate = baud;
     HAL_UART_Init(&huart_esp8266);
+
     rx_write_idx = 0;
     memset(rx_ring_buf, 0, sizeof(rx_ring_buf));
     HAL_UART_Receive_IT(&huart_esp8266, &rx_byte, 1);
 }
 
-/**
- * @brief 清除 UART 错误标志，重新启动接收
- *        RST 后 ESP8266 启动信息以 74880 波特率输出，会导致帧错误
- */
 static void esp8266_uart_recover(void)
 {
-    /* 清除所有错误标志 */
-    __HAL_UART_CLEAR_OREFLAG(&huart_esp8266); /* 溢出错误 */
-    __HAL_UART_CLEAR_NEFLAG(&huart_esp8266);  /* 噪声错误 */
-    __HAL_UART_CLEAR_FEFLAG(&huart_esp8266);  /* 帧错误 */
-    __HAL_UART_CLEAR_PEFLAG(&huart_esp8266);  /* 校验错误 */
+    __HAL_UART_CLEAR_OREFLAG(&huart_esp8266);
+    __HAL_UART_CLEAR_NEFLAG(&huart_esp8266);
+    __HAL_UART_CLEAR_FEFLAG(&huart_esp8266);
+    __HAL_UART_CLEAR_PEFLAG(&huart_esp8266);
 
-    /* 如果 HAL 处于错误状态，重新初始化并启动接收 */
     if (huart_esp8266.RxState != HAL_UART_STATE_READY &&
         huart_esp8266.RxState != HAL_UART_STATE_BUSY_RX)
     {
@@ -228,115 +411,173 @@ static void esp8266_uart_recover(void)
         HAL_UART_Init(&huart_esp8266);
     }
 
-    /* 清空缓冲区并重新启动接收 */
     rx_write_idx = 0;
     memset(rx_ring_buf, 0, sizeof(rx_ring_buf));
     HAL_UART_Receive_IT(&huart_esp8266, &rx_byte, 1);
 }
 
-/**
- * @brief 向 ESP8266 发送原始字节串
- */
-static void esp8266_send_str(const char *str)
-{
-    HAL_UART_Transmit(&huart_esp8266, (uint8_t *)str, strlen(str), 500);
-}
+/* ==================== 发送队列实现 ==================== */
 
-/**
- * @brief 清空接收缓冲区
- */
-static void esp8266_clear_rx(void)
+static void esp8266_tx_queue_reset(void)
 {
+    uint16_t i;
+
     __disable_irq();
-    rx_write_idx = 0;
-    memset(rx_ring_buf, 0, sizeof(rx_ring_buf));
+    s_tx_head = 0;
+    s_tx_tail = 0;
+    s_tx_count = 0;
     __enable_irq();
+
+    for (i = 0; i < ESP8266_TX_QUEUE_CAPACITY; i++)
+    {
+        s_tx_queue[i].used = 0u;
+        memset(&s_tx_queue[i].item, 0, sizeof(s_tx_queue[i].item));
+    }
+
+    memset(&s_tx_current, 0, sizeof(s_tx_current));
+    s_tx_has_current = 0u;
+    esp8266_set_tx_phase(TX_ENGINE_IDLE);
 }
 
-/**
- * @brief 将接收缓冲区快照到线性 resp_buf
- * @return 拷贝的字节数
- */
-static uint16_t esp8266_snapshot_resp(void)
+static int esp8266_tx_queue_push_internal(const esp8266_tx_item_t *item)
 {
-    uint16_t len;
+    if (!item)
+        return 0;
+
     __disable_irq();
-    len = rx_write_idx;
-    if (len > sizeof(resp_buf) - 1)
-        len = sizeof(resp_buf) - 1;
-    memcpy(resp_buf, rx_ring_buf, len);
-    resp_buf[len] = '\0';
+    if (s_tx_count >= ESP8266_TX_QUEUE_CAPACITY)
+    {
+        __enable_irq();
+        return 0;
+    }
+
+    s_tx_queue[s_tx_tail].used = 1u;
+    memcpy(&s_tx_queue[s_tx_tail].item, item, sizeof(esp8266_tx_item_t));
+    s_tx_tail = (uint16_t)((s_tx_tail + 1u) % ESP8266_TX_QUEUE_CAPACITY);
+    s_tx_count++;
     __enable_irq();
-    return len;
+
+    return 1;
 }
 
-/**
- * @brief 发送 AT 指令（仅发送，不等待响应）
- */
-static void esp8266_send_cmd(const char *cmd)
+static int esp8266_tx_queue_pop_internal(esp8266_tx_item_t *item)
 {
-    char buf[256];
-    esp8266_clear_rx();
-    snprintf(buf, sizeof(buf), "%s\r\n", cmd);
-    esp8266_send_str(buf);
+    if (!item)
+        return 0;
+
+    __disable_irq();
+    if (s_tx_count == 0u)
+    {
+        __enable_irq();
+        return 0;
+    }
+
+    memcpy(item, &s_tx_queue[s_tx_head].item, sizeof(esp8266_tx_item_t));
+    s_tx_queue[s_tx_head].used = 0u;
+    memset(&s_tx_queue[s_tx_head].item, 0, sizeof(esp8266_tx_item_t));
+
+    s_tx_head = (uint16_t)((s_tx_head + 1u) % ESP8266_TX_QUEUE_CAPACITY);
+    s_tx_count--;
+    __enable_irq();
+
+    return 1;
 }
 
-/**
- * @brief 非阻塞检查响应是否包含指定关键字
- */
-static int esp8266_check_resp(const char *keyword)
+uint16_t esp8266_tx_queue_count(void)
 {
-    esp8266_snapshot_resp();
-    return (strstr(resp_buf, keyword) != NULL) ? 1 : 0;
+    uint16_t count;
+
+    __disable_irq();
+    count = s_tx_count;
+    __enable_irq();
+
+    return count;
 }
 
-/**
- * @brief 检查当前阶段是否超时
- */
-static int esp8266_phase_timeout(uint32_t ms)
+uint8_t esp8266_tx_queue_is_empty(void)
 {
-    return (HAL_GetTick() - s_phase_tick) >= ms;
+    return (esp8266_tx_queue_count() == 0u) ? 1u : 0u;
 }
 
-/**
- * @brief 切换到新的状态机阶段
- */
-static void esp8266_set_phase(init_phase_t phase)
+uint8_t esp8266_tx_in_progress(void)
 {
-    s_phase = phase;
-    s_phase_tick = HAL_GetTick();
+    return (s_tx_phase != TX_ENGINE_IDLE) ? 1u : 0u;
 }
 
-/**
- * @brief 切换 TCP 状态机阶段并记录时间戳
- */
-static void esp8266_set_tcp_phase(tcp_phase_t phase)
+void esp8266_tx_queue_clear(void)
 {
-    s_tcp_phase = phase;
-    s_tcp_phase_tick = HAL_GetTick();
+    esp8266_tx_queue_reset();
 }
 
-/**
- * @brief 检查 TCP 阶段是否超时
- */
-static int esp8266_tcp_phase_timeout(uint32_t ms)
+static esp8266_send_result_t esp8266_queue_item(esp8266_tx_kind_t kind,
+                                                const uint8_t *data,
+                                                uint16_t len,
+                                                uint8_t append_crlf)
 {
-    return (HAL_GetTick() - s_tcp_phase_tick) >= ms;
+    esp8266_tx_item_t item;
+
+    if (!data || len == 0u)
+        return ESP8266_SEND_INVALID;
+
+    if (s_status != ESP8266_STATUS_TCP_CONNECTED)
+        return ESP8266_SEND_NOT_READY;
+
+    if (kind == ESP8266_TX_KIND_TCP_RAW)
+    {
+        if (len > ESP8266_MAX_TX_PAYLOAD)
+            return ESP8266_SEND_TOO_LARGE;
+    }
+    else
+    {
+        uint16_t extra = append_crlf ? ((kind == ESP8266_TX_KIND_AT_CMD) ? 2u : 1u) : 0u;
+        if ((uint32_t)len + (uint32_t)extra > ESP8266_MAX_TX_PAYLOAD)
+            return ESP8266_SEND_TOO_LARGE;
+    }
+
+    memset(&item, 0, sizeof(item));
+    item.kind = kind;
+    item.len = len;
+    item.append_crlf = append_crlf;
+    memcpy(item.data, data, len);
+
+    if (!esp8266_tx_queue_push_internal(&item))
+        return ESP8266_SEND_QUEUE_FULL;
+
+    return ESP8266_SEND_OK;
 }
 
-/* 前向声明：tcp_poll 中需要用到，但定义在后面 */
-static void esp8266_save_debug(const char *msg);
+esp8266_send_result_t esp8266_tcp_send_async(const uint8_t *data, uint16_t len)
+{
+    return esp8266_queue_item(ESP8266_TX_KIND_TCP_RAW, data, len, 0u);
+}
 
-/**
- * @brief 链路监测：在 TCP 已连接状态下监测远端断开事件
- *        ESP8266 会异步上报 CLOSED/CONNECT FAIL，不处理会导致状态滞后
- */
+esp8266_send_result_t esp8266_tcp_send_text_async(const char *text, uint8_t append_lf)
+{
+    if (!text)
+        return ESP8266_SEND_INVALID;
+
+    return esp8266_queue_item(ESP8266_TX_KIND_TCP_TEXT,
+                              (const uint8_t *)text,
+                              (uint16_t)strlen(text),
+                              append_lf ? 1u : 0u);
+}
+
+esp8266_send_result_t esp8266_tcp_send_line_async(const char *line)
+{
+    return esp8266_tcp_send_text_async(line, 1u);
+}
+
+/* ==================== 链路监测 ==================== */
+
 static void tcp_link_monitor(void)
 {
     if (s_status != ESP8266_STATUS_TCP_CONNECTED)
         return;
-    /* 状态机忙（心跳发送中等）时不做断链监测，避免干扰 */
+
     if (s_tcp_phase != TCP_PHASE_DONE_OK)
+        return;
+
+    if (s_tx_phase != TX_ENGINE_IDLE)
         return;
 
     esp8266_snapshot_resp();
@@ -344,17 +585,95 @@ static void tcp_link_monitor(void)
         strstr(resp_buf, "CONNECT FAIL") != NULL ||
         strstr(resp_buf, "link is not valid") != NULL)
     {
+        char snip[96];
+        size_t n = strlen(resp_buf);
+        size_t i;
+
+        if (n > 80u)
+            n = 80u;
+
+        memcpy(snip, resp_buf, n);
+        snip[n] = '\0';
+
+        for (i = 0; snip[i]; i++)
+        {
+            if (snip[i] == '\r' || snip[i] == '\n')
+                snip[i] = ' ';
+        }
+
+        debug_printf("[ESP] link lost: %s\r\n", snip);
+
         s_status = ESP8266_STATUS_WIFI_GOT_IP;
-        s_tcp_phase = TCP_PHASE_IDLE;
+        esp8266_set_tcp_phase(TCP_PHASE_IDLE);
         esp8266_save_debug("TCP:Disconnected");
         esp8266_clear_rx();
+        esp8266_tx_queue_reset();
     }
 }
 
-/**
- * @brief TCP 非阻塞状态机驱动，由 esp8266_poll() 调用
- *        每次调用只做一个非阻塞动作并立即返回，不使用 HAL_Delay
- */
+/* ==================== IP 地址解析 ==================== */
+
+static void parse_cifsr_ip(void)
+{
+    char *p;
+
+    esp8266_snapshot_resp();
+
+    p = strstr(resp_buf, "STAIP,\"");
+    if (p)
+    {
+        char *end;
+        uint16_t len;
+
+        p += 7;
+        end = strchr(p, '"');
+        if (end)
+        {
+            len = (uint16_t)(end - p);
+            if (len >= sizeof(s_ip_addr))
+                len = (uint16_t)(sizeof(s_ip_addr) - 1u);
+
+            memcpy(s_ip_addr, p, len);
+            s_ip_addr[len] = '\0';
+            return;
+        }
+    }
+
+    p = resp_buf;
+    while (*p)
+    {
+        if (*p >= '1' && *p <= '9')
+        {
+            int dots = 0;
+            char *scan = p;
+
+            while ((*scan >= '0' && *scan <= '9') || *scan == '.')
+            {
+                if (*scan == '.')
+                    dots++;
+                scan++;
+            }
+
+            if (dots == 3 && (scan - p) >= 7)
+            {
+                uint16_t len = (uint16_t)(scan - p);
+
+                if (len >= sizeof(s_ip_addr))
+                    len = (uint16_t)(sizeof(s_ip_addr) - 1u);
+
+                memcpy(s_ip_addr, p, len);
+                s_ip_addr[len] = '\0';
+
+                if (strcmp(s_ip_addr, "0.0.0.0") != 0)
+                    return;
+            }
+        }
+        p++;
+    }
+}
+
+/* ==================== TCP 连接状态机 ==================== */
+
 static void tcp_poll(void)
 {
     char cmd[128];
@@ -364,57 +683,36 @@ static void tcp_poll(void)
     case TCP_PHASE_IDLE:
     case TCP_PHASE_DONE_OK:
     case TCP_PHASE_DONE_FAIL:
-        /* 终止态：等待外部触发或读取结果，不继续推进 */
         break;
 
     case TCP_PHASE_CIPMUX_SEND:
-        esp8266_send_cmd("AT+CIPMUX=0");
-        esp8266_set_tcp_phase(TCP_PHASE_CIPMUX_WAIT);
+        if (esp8266_send_cmd_now("AT+CIPMUX=0"))
+        {
+            esp8266_set_tcp_phase(TCP_PHASE_CIPMUX_WAIT);
+        }
         break;
 
     case TCP_PHASE_CIPMUX_WAIT:
-        /* CIPMUX 只用于关联模式设置，超时也继续 */
         if (esp8266_check_resp("OK") || esp8266_tcp_phase_timeout(AT_CMD_TIMEOUT))
+        {
             esp8266_set_tcp_phase(TCP_PHASE_CIPSTART_SEND);
+        }
         break;
 
     case TCP_PHASE_CIPSTART_SEND:
         snprintf(cmd, sizeof(cmd), "AT+CIPSTART=\"TCP\",\"%s\",%u",
                  s_tcp_server_ip, s_tcp_server_port);
-        esp8266_send_cmd(cmd);
-        esp8266_save_debug("TCP:Connecting..");
-        esp8266_set_tcp_phase(TCP_PHASE_CIPSTART_WAIT);
+        if (esp8266_send_cmd_now(cmd))
+        {
+            esp8266_save_debug("TCP:Connecting..");
+            debug_printf("[ESP] %s\r\n", cmd);
+            esp8266_set_tcp_phase(TCP_PHASE_CIPSTART_WAIT);
+        }
         break;
 
     case TCP_PHASE_CIPSTART_WAIT:
         esp8266_snapshot_resp();
         {
-            /*
-             * 调试：把原始响应的前30字符记录到调试信息
-             * 用于排查连接失败原因
-             */
-            if (resp_buf[0] != '\0')
-            {
-                char dbg[64];
-                snprintf(dbg, sizeof(dbg), "R:%.30s", resp_buf);
-                /* 替换换行符为可见字符 */
-                for (int i = 0; dbg[i]; i++)
-                {
-                    if (dbg[i] == '\r')
-                        dbg[i] = '<';
-                    if (dbg[i] == '\n')
-                        dbg[i] = '>';
-                }
-                esp8266_save_debug(dbg);
-            }
-
-            /*
-             * 判定顺序非常关键：
-             * 1. 先检查明确的失败关键字 CONNECT FAIL
-             * 2. 再用宽泛的 CONNECT 子串匹配成功（覆盖 CONNECT / ALREADY CONNECTED / Linked）
-             *    因为 CONNECT FAIL 已被步骤 1 排除，这里不会误判
-             * 3. 最后判断 ERROR / CLOSED / 超时
-             */
             int connect_fail = (strstr(resp_buf, "CONNECT FAIL") != NULL);
             int got_connect = (strstr(resp_buf, "CONNECT") != NULL) ||
                               (strstr(resp_buf, "Linked") != NULL);
@@ -424,26 +722,28 @@ static void tcp_poll(void)
             if (connect_fail)
             {
                 esp8266_save_debug("TCP:fail");
-                s_tcp_phase = TCP_PHASE_DONE_FAIL;
+                esp8266_set_tcp_phase(TCP_PHASE_DONE_FAIL);
             }
             else if (got_connect)
             {
                 s_status = ESP8266_STATUS_TCP_CONNECTED;
                 esp8266_save_debug("TCP:Connected");
-                s_tcp_phase = TCP_PHASE_DONE_OK;
+                esp8266_set_tcp_phase(TCP_PHASE_DONE_OK);
             }
             else if (got_error || esp8266_tcp_phase_timeout(TCP_CONNECT_TIMEOUT))
             {
                 esp8266_save_debug("TCP:fail");
-                s_tcp_phase = TCP_PHASE_DONE_FAIL;
+                esp8266_set_tcp_phase(TCP_PHASE_DONE_FAIL);
             }
-            break;
         }
+        break;
 
-    /* -------- 心跳发送（非阻塞） -------- */
     case TCP_PHASE_HB_CIPSEND:
-        esp8266_send_cmd("AT+CIPSEND=3");
-        esp8266_set_tcp_phase(TCP_PHASE_HB_PROMPT_WAIT);
+        if (s_tx_phase == TX_ENGINE_IDLE &&
+            esp8266_send_cmd_now("AT+CIPSEND=3"))
+        {
+            esp8266_set_tcp_phase(TCP_PHASE_HB_PROMPT_WAIT);
+        }
         break;
 
     case TCP_PHASE_HB_PROMPT_WAIT:
@@ -455,18 +755,22 @@ static void tcp_poll(void)
                  esp8266_check_resp("CLOSED") ||
                  esp8266_tcp_phase_timeout(AT_CMD_TIMEOUT))
         {
-            /* 发送失败，链路已断 */
             s_status = ESP8266_STATUS_WIFI_GOT_IP;
             esp8266_save_debug("HB:link lost");
-            s_tcp_phase = TCP_PHASE_DONE_FAIL;
+            esp8266_set_tcp_phase(TCP_PHASE_DONE_FAIL);
             esp8266_clear_rx();
         }
         break;
 
     case TCP_PHASE_HB_DATA:
-        esp8266_clear_rx(); /* 清除 > 符号，准备接收 SEND OK */
-        esp8266_send_str("HB\n");
-        esp8266_set_tcp_phase(TCP_PHASE_HB_ACK_WAIT);
+        if (esp8266_uart_tx_ready())
+        {
+            esp8266_clear_rx();
+            if (esp8266_send_raw_str("HB\n"))
+            {
+                esp8266_set_tcp_phase(TCP_PHASE_HB_ACK_WAIT);
+            }
+        }
         break;
 
     case TCP_PHASE_HB_ACK_WAIT:
@@ -474,7 +778,7 @@ static void tcp_poll(void)
         if (strstr(resp_buf, "SEND OK") != NULL)
         {
             esp8266_clear_rx();
-            s_tcp_phase = TCP_PHASE_DONE_OK;
+            esp8266_set_tcp_phase(TCP_PHASE_DONE_OK);
         }
         else if (strstr(resp_buf, "ERROR") != NULL ||
                  strstr(resp_buf, "CLOSED") != NULL ||
@@ -482,200 +786,226 @@ static void tcp_poll(void)
         {
             s_status = ESP8266_STATUS_WIFI_GOT_IP;
             esp8266_save_debug("HB:send fail");
-            s_tcp_phase = TCP_PHASE_DONE_FAIL;
+            esp8266_set_tcp_phase(TCP_PHASE_DONE_FAIL);
             esp8266_clear_rx();
         }
+        break;
+
+    case TCP_PHASE_CLOSE_SEND:
+        if (esp8266_send_cmd_now("AT+CIPCLOSE"))
+        {
+            esp8266_set_tcp_phase(TCP_PHASE_CLOSE_WAIT);
+        }
+        break;
+
+    case TCP_PHASE_CLOSE_WAIT:
+        if (esp8266_check_resp("OK") || esp8266_check_resp("CLOSED") ||
+            esp8266_tcp_phase_timeout(AT_CMD_TIMEOUT))
+        {
+            if (s_status == ESP8266_STATUS_TCP_CONNECTED)
+                s_status = ESP8266_STATUS_WIFI_GOT_IP;
+
+            esp8266_set_tcp_phase(TCP_PHASE_IDLE);
+            esp8266_tx_queue_reset();
+        }
+        break;
+
+    default:
         break;
     }
 }
 
-/**
- * @brief 保存调试信息（截取前 63 字符）
- */
-static void esp8266_save_debug(const char *msg)
+/* ==================== 发送事务状态机 ==================== */
+
+static void tx_engine_start_next(void)
 {
-    strncpy(s_debug_msg, msg, sizeof(s_debug_msg) - 1);
-    s_debug_msg[sizeof(s_debug_msg) - 1] = '\0';
+    if (s_status != ESP8266_STATUS_TCP_CONNECTED)
+        return;
+
+    if (s_tcp_phase != TCP_PHASE_DONE_OK)
+        return;
+
+    if (s_tx_phase != TX_ENGINE_IDLE)
+        return;
+
+    if (!esp8266_tx_queue_pop_internal(&s_tx_current))
+        return;
+
+    s_tx_has_current = 1u;
+
+    {
+        char cmd[32];
+        uint8_t payload[ESP8266_MAX_TX_PAYLOAD];
+        uint16_t payload_len = 0;
+
+        format_tx_item_payload(&s_tx_current, payload, &payload_len);
+        snprintf(cmd, sizeof(cmd), "AT+CIPSEND=%u", payload_len);
+        if (esp8266_send_cmd_now(cmd))
+        {
+            esp8266_set_tx_phase(TX_ENGINE_PROMPT_WAIT);
+        }
+    }
 }
 
-/* ==================== 阻塞式 AT（TCP 操作用） ==================== */
-
-static int esp8266_send_at_blocking(const char *cmd, const char *expect,
-                                    uint32_t timeout_ms)
+static void tx_engine_finish_current(int success, const char *dbg)
 {
-    char at_buf[256];
-    esp8266_clear_rx();
-    snprintf(at_buf, sizeof(at_buf), "%s\r\n", cmd);
-    esp8266_send_str(at_buf);
-
-    uint32_t start = HAL_GetTick();
-    while ((HAL_GetTick() - start) < timeout_ms)
+    if (!success)
     {
+        int link_lost;
+
         esp8266_snapshot_resp();
-        if (strstr(resp_buf, expect) != NULL)
-            return 0;
-        HAL_Delay(20);
-    }
-    return -1;
-}
+        link_lost = (strstr(resp_buf, "CLOSED") != NULL) ||
+                    (strstr(resp_buf, "link is not valid") != NULL) ||
+                    (strstr(resp_buf, "CONNECT FAIL") != NULL);
 
-/* ==================== 中断服务 ==================== */
-
-void esp8266_uart_irq_handler(void)
-{
-    HAL_UART_IRQHandler(&huart_esp8266);
-}
-
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-    if (huart->Instance == ESP8266_USART)
-    {
-        if (rx_write_idx < ESP8266_RX_BUF_SIZE - 1)
-            rx_ring_buf[rx_write_idx++] = rx_byte;
-        HAL_UART_Receive_IT(&huart_esp8266, &rx_byte, 1);
-    }
-}
-
-/**
- * @brief UART 错误回调：ESP8266 复位时 74880 波特率输出会导致帧错误，
- *        必须在此重新启动接收，否则接收链永久中断
- */
-void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
-{
-    if (huart->Instance == ESP8266_USART)
-    {
-        __HAL_UART_CLEAR_OREFLAG(huart);
-        __HAL_UART_CLEAR_NEFLAG(huart);
-        __HAL_UART_CLEAR_FEFLAG(huart);
-        __HAL_UART_CLEAR_PEFLAG(huart);
-        HAL_UART_Receive_IT(huart, &rx_byte, 1);
-    }
-}
-
-/* ==================== IP 地址解析（兼容新旧固件） ==================== */
-
-/**
- * @brief 从 CIFSR 响应中提取 IP 地址
- *        新固件: +CIFSR:STAIP,"192.168.x.x"
- *        旧固件: 192.168.x.x （直接返回裸 IP）
- */
-static void parse_cifsr_ip(void)
-{
-    esp8266_snapshot_resp();
-
-    /* 新固件格式：查找 STAIP," */
-    char *p = strstr(resp_buf, "STAIP,\"");
-    if (p)
-    {
-        p += 7;
-        char *end = strchr(p, '"');
-        if (end)
+        esp8266_save_debug(dbg ? dbg : "TX:fail");
+        if (link_lost)
         {
-            uint16_t len = (uint16_t)(end - p);
-            if (len >= sizeof(s_ip_addr))
-                len = sizeof(s_ip_addr) - 1;
-            memcpy(s_ip_addr, p, len);
-            s_ip_addr[len] = '\0';
-            return;
+            s_status = ESP8266_STATUS_WIFI_GOT_IP;
+            esp8266_set_tcp_phase(TCP_PHASE_DONE_FAIL);
+        }
+        else
+        {
+            esp8266_set_tcp_phase(TCP_PHASE_DONE_OK);
         }
     }
 
-    /* 旧固件格式：在响应文本中找形如 x.x.x.x 的 IP */
-    p = resp_buf;
-    while (*p)
+    memset(&s_tx_current, 0, sizeof(s_tx_current));
+    s_tx_has_current = 0u;
+    esp8266_set_tx_phase(TX_ENGINE_IDLE);
+    esp8266_clear_rx();
+}
+
+static void tx_engine_poll(void)
+{
+    if (s_status != ESP8266_STATUS_TCP_CONNECTED)
+        return;
+
+    if (s_tcp_phase != TCP_PHASE_DONE_OK)
+        return;
+
+    if (s_tx_phase == TX_ENGINE_IDLE)
     {
-        if (*p >= '1' && *p <= '9')
+        tx_engine_start_next();
+        return;
+    }
+
+    switch (s_tx_phase)
+    {
+    case TX_ENGINE_PROMPT_WAIT:
+        if (esp8266_check_resp(">"))
         {
-            int dots = 0;
-            char *scan = p;
-            while ((*scan >= '0' && *scan <= '9') || *scan == '.')
+            esp8266_set_tx_phase(TX_ENGINE_DATA_SEND);
+        }
+        else if (esp8266_check_resp("ERROR") ||
+                 esp8266_check_resp("CLOSED") ||
+                 esp8266_tx_phase_timeout(AT_CMD_TIMEOUT))
+        {
+            tx_engine_finish_current(0, "TX:prompt fail");
+        }
+        break;
+
+    case TX_ENGINE_DATA_SEND:
+        if (s_tx_has_current)
+        {
+            uint8_t payload[ESP8266_MAX_TX_PAYLOAD];
+            uint16_t payload_len = 0;
+
+            format_tx_item_payload(&s_tx_current, payload, &payload_len);
+            if (esp8266_uart_tx_ready())
             {
-                if (*scan == '.')
-                    dots++;
-                scan++;
-            }
-            if (dots == 3 && (scan - p) >= 7)
-            {
-                uint16_t len = (uint16_t)(scan - p);
-                if (len >= sizeof(s_ip_addr))
-                    len = sizeof(s_ip_addr) - 1;
-                memcpy(s_ip_addr, p, len);
-                s_ip_addr[len] = '\0';
-                if (strcmp(s_ip_addr, "0.0.0.0") != 0)
-                    return;
+                esp8266_clear_rx();
+                if (esp8266_send_raw_buf(payload, payload_len))
+                {
+                    esp8266_set_tx_phase(TX_ENGINE_ACK_WAIT);
+                }
             }
         }
-        p++;
+        else
+        {
+            esp8266_set_tx_phase(TX_ENGINE_IDLE);
+        }
+        break;
+
+    case TX_ENGINE_ACK_WAIT:
+        esp8266_snapshot_resp();
+        if (strstr(resp_buf, "SEND OK") != NULL)
+        {
+            tx_engine_finish_current(1, "TX:ok");
+        }
+        else if (strstr(resp_buf, "ERROR") != NULL ||
+                 strstr(resp_buf, "CLOSED") != NULL ||
+                 esp8266_tx_phase_timeout(AT_CMD_TIMEOUT))
+        {
+            tx_engine_finish_current(0, "TX:ack fail");
+        }
+        break;
+
+    default:
+        break;
     }
 }
 
-/* ==================== 非阻塞状态机驱动 ==================== */
+/* ==================== 初始化状态机 ==================== */
 
-void esp8266_init(void)
-{
-    esp8266_gpio_init(); /* 先初始化 CH_PD/RST 引脚，使能模块 */
-    esp8266_uart_init();
-    s_status = ESP8266_STATUS_INITIALIZING;
-    s_retry_count = 0;
-    s_use_cwjap_def = 0;
-    s_baud_idx = 0;
-    s_ip_addr[0] = '\0';
-    s_debug_msg[0] = '\0';
-    esp8266_set_phase(INIT_POWERON);
-}
-
-void esp8266_poll(void)
+static void init_poll(void)
 {
     char cmd_buf[128];
 
     switch (s_phase)
     {
-    /* -------- 上电等待 -------- */
     case INIT_POWERON:
         if (esp8266_phase_timeout(POWERON_DELAY))
-            esp8266_set_phase(INIT_RST_SEND);
+        {
+            esp8266_set_phase(INIT_RST_ASSERT);
+        }
         break;
 
-    /* -------- 硬件复位 -------- */
-    case INIT_RST_SEND:
-        esp8266_hw_reset(); /* 用 GPIO 硬复位代替 AT+RST */
+    case INIT_RST_ASSERT:
+        HAL_GPIO_WritePin(ESP8266_RST_PORT, ESP8266_RST_PIN, GPIO_PIN_RESET);
         esp8266_save_debug("HW RST...");
-        esp8266_set_phase(INIT_RST_WAIT);
+        esp8266_set_phase(INIT_RST_RELEASE);
+        break;
+
+    case INIT_RST_RELEASE:
+        if (esp8266_phase_timeout(HW_RST_LOW_MS))
+        {
+            HAL_GPIO_WritePin(ESP8266_RST_PORT, ESP8266_RST_PIN, GPIO_PIN_SET);
+            esp8266_set_phase(INIT_RST_WAIT);
+        }
         break;
 
     case INIT_RST_WAIT:
         if (esp8266_check_resp("ready") || esp8266_check_resp("Ready"))
         {
-            /* 复位完成后恢复 UART 状态，清除启动时的帧错误 */
             esp8266_uart_recover();
-            s_retry_count = 0;
-            s_baud_idx = 0;
+            s_retry_count = 0u;
+            s_baud_idx = 0u;
             esp8266_set_phase(INIT_AT_SEND);
         }
         else if (esp8266_phase_timeout(RST_TIMEOUT))
         {
-            /* 超时也继续，旧固件可能不输出 "ready" */
             esp8266_uart_recover();
-            s_retry_count = 0;
-            s_baud_idx = 0;
+            s_retry_count = 0u;
+            s_baud_idx = 0u;
             esp8266_set_phase(INIT_AT_SEND);
         }
         break;
 
-    /* -------- AT 握手（多波特率自动探测） -------- */
     case INIT_AT_SEND:
     {
-        /* 首次进入或切换波特率后，同步 USART3 波特率 */
         uint32_t target_baud = s_baud_table[s_baud_idx];
+        char baud_msg[32];
+
         if (huart_esp8266.Init.BaudRate != target_baud)
             esp8266_uart_set_baud(target_baud);
 
-        char baud_msg[32];
-        snprintf(baud_msg, sizeof(baud_msg), "AT@%lu..",
-                 (unsigned long)target_baud);
+        snprintf(baud_msg, sizeof(baud_msg), "AT@%lu..", (unsigned long)target_baud);
         esp8266_save_debug(baud_msg);
-        esp8266_send_cmd("AT");
-        esp8266_set_phase(INIT_AT_WAIT);
+        if (esp8266_send_cmd_now("AT"))
+        {
+            esp8266_set_phase(INIT_AT_WAIT);
+        }
         break;
     }
 
@@ -683,15 +1013,11 @@ void esp8266_poll(void)
         if (esp8266_check_resp("OK"))
         {
             uint32_t cur_baud = s_baud_table[s_baud_idx];
-            s_retry_count = 0;
+            s_retry_count = 0u;
 
-            /* 如果不是 115200，需要先切换 ESP8266 波特率 */
-            if (cur_baud != 115200)
+            if (cur_baud != ESP8266_USART_BAUDRATE)
             {
-                char msg[32];
-                snprintf(msg, sizeof(msg), "AT OK@%lu",
-                         (unsigned long)cur_baud);
-                esp8266_save_debug(msg);
+                esp8266_save_debug("set target baud...");
                 esp8266_set_phase(INIT_UART_DEF_SEND);
             }
             else
@@ -709,8 +1035,7 @@ void esp8266_poll(void)
             }
             else if (++s_baud_idx < BAUD_TABLE_SIZE)
             {
-                /* 当前波特率不通，尝试下一个 */
-                s_retry_count = 0;
+                s_retry_count = 0u;
                 esp8266_set_phase(INIT_AT_SEND);
             }
             else
@@ -722,151 +1047,127 @@ void esp8266_poll(void)
         }
         break;
 
-    /* -------- 关闭回显 -------- */
     case INIT_ATE0_SEND:
-        esp8266_send_cmd("ATE0");
-        esp8266_set_phase(INIT_ATE0_WAIT);
+        if (esp8266_send_cmd_now("ATE0"))
+        {
+            esp8266_set_phase(INIT_ATE0_WAIT);
+        }
         break;
 
     case INIT_ATE0_WAIT:
         if (esp8266_check_resp("OK") || esp8266_phase_timeout(AT_CMD_TIMEOUT))
+        {
             esp8266_set_phase(INIT_CWMODE_SEND);
+        }
         break;
 
-    /* -------- 切换 ESP8266 到 115200 波特率（非 115200 时执行） -------- */
     case INIT_UART_DEF_SEND:
-    {
-        /* 用当前波特率发送改波特率指令 */
-        esp8266_save_debug("set 115200...");
-        esp8266_send_cmd("AT+UART_DEF=115200,8,1,0,0");
-        esp8266_set_phase(INIT_UART_DEF_WAIT);
+        if (esp8266_send_cmd_now("AT+UART_DEF=115200,8,1,0,0"))
+        {
+            esp8266_set_phase(INIT_UART_DEF_WAIT);
+        }
         break;
-    }
 
     case INIT_UART_DEF_WAIT:
         if (esp8266_check_resp("OK") || esp8266_phase_timeout(AT_CMD_TIMEOUT))
         {
-            /* 切换本地 USART3 波特率到 115200 */
-            HAL_Delay(100); /* 等 ESP8266 切换完成 */
-            esp8266_uart_set_baud(115200);
-            s_baud_idx = 0;
+            esp8266_set_phase(INIT_UART_SWITCH_WAIT);
+        }
+        break;
+
+    case INIT_UART_SWITCH_WAIT:
+        if (esp8266_phase_timeout(UART_SWITCH_DELAY_MS))
+        {
+            esp8266_uart_set_baud(ESP8266_USART_BAUDRATE);
+            s_baud_idx = 0u;
             esp8266_save_debug("baud->115200");
-            /* 验证 AT 是否在 115200 下可用 */
-            s_retry_count = 0;
+            s_retry_count = 0u;
             esp8266_set_phase(INIT_ATE0_SEND);
         }
         break;
 
-    /* -------- 设置 Station 模式 -------- */
     case INIT_CWMODE_SEND:
-        esp8266_send_cmd("AT+CWMODE=1");
-        esp8266_set_phase(INIT_CWMODE_WAIT);
+        if (esp8266_send_cmd_now("AT+CWMODE=1"))
+        {
+            esp8266_set_phase(INIT_CWMODE_WAIT);
+        }
         break;
 
     case INIT_CWMODE_WAIT:
-        if (esp8266_check_resp("OK") || esp8266_check_resp("no change"))
+        if (esp8266_check_resp("OK") || esp8266_check_resp("no change") ||
+            esp8266_phase_timeout(AT_CMD_TIMEOUT))
         {
             s_status = ESP8266_STATUS_READY;
-            s_retry_count = 0;
-            esp8266_set_phase(INIT_CWJAP_SEND);
-        }
-        else if (esp8266_phase_timeout(AT_CMD_TIMEOUT))
-        {
-            /* 超时也继续 */
-            s_status = ESP8266_STATUS_READY;
-            s_retry_count = 0;
+            s_retry_count = 0u;
             esp8266_set_phase(INIT_CWJAP_SEND);
         }
         break;
 
-    /* -------- 连接 WiFi（兼容新旧固件，带重试） -------- */
     case INIT_CWJAP_SEND:
         s_status = ESP8266_STATUS_CONNECTING_WIFI;
         if (s_use_cwjap_def)
+        {
             snprintf(cmd_buf, sizeof(cmd_buf),
                      "AT+CWJAP_DEF=\"%s\",\"%s\"", WIFI_SSID, WIFI_PASSWORD);
+        }
         else
+        {
             snprintf(cmd_buf, sizeof(cmd_buf),
                      "AT+CWJAP=\"%s\",\"%s\"", WIFI_SSID, WIFI_PASSWORD);
-        esp8266_send_cmd(cmd_buf);
-        esp8266_save_debug(s_use_cwjap_def ? "CWJAP_DEF..." : "CWJAP...");
-        esp8266_set_phase(INIT_CWJAP_WAIT);
+        }
+        if (esp8266_send_cmd_now(cmd_buf))
+        {
+            esp8266_save_debug(s_use_cwjap_def ? "CWJAP_DEF..." : "CWJAP...");
+            esp8266_set_phase(INIT_CWJAP_WAIT);
+        }
         break;
 
     case INIT_CWJAP_WAIT:
     {
-        /* 获取一次快照，后续多次判断用同一份数据 */
-        esp8266_snapshot_resp();
-        int got_ip = (strstr(resp_buf, "WIFI GOT IP") != NULL) ||
-                     (strstr(resp_buf, "GOT IP") != NULL);
-        int got_ok = (strstr(resp_buf, "OK") != NULL);
-        int got_fail = (strstr(resp_buf, "FAIL") != NULL);
-        int got_err = (strstr(resp_buf, "ERROR") != NULL);
-        int got_cwjap_err = (strstr(resp_buf, "+CWJAP:") != NULL);
+        int got_ip, got_ok, got_fail, got_err, got_cwjap_err;
 
-        /* 成功：收到 WIFI GOT IP */
+        esp8266_snapshot_resp();
+        got_ip = (strstr(resp_buf, "WIFI GOT IP") != NULL) ||
+                 (strstr(resp_buf, "GOT IP") != NULL);
+        got_ok = (strstr(resp_buf, "OK") != NULL);
+        got_fail = (strstr(resp_buf, "FAIL") != NULL);
+        got_err = (strstr(resp_buf, "ERROR") != NULL);
+        got_cwjap_err = (strstr(resp_buf, "+CWJAP:") != NULL);
+
         if (got_ip)
         {
             esp8266_save_debug("WiFi OK");
             s_status = ESP8266_STATUS_WIFI_GOT_IP;
             esp8266_set_phase(INIT_CIFSR_SEND);
         }
-        /* 成功（旧固件兼容）：收到 OK 但没有 FAIL/ERROR */
         else if (got_ok && !got_fail && !got_err)
         {
-            /* 多等 3 秒，旧固件 OK 后可能还有 WIFI GOT IP 陆续到达 */
-            if (esp8266_phase_timeout(3000))
+            if (esp8266_phase_timeout(3000u))
             {
                 esp8266_save_debug("WiFi OK(old)");
                 s_status = ESP8266_STATUS_WIFI_GOT_IP;
                 esp8266_set_phase(INIT_CIFSR_SEND);
             }
         }
-        /* 失败：收到 FAIL 或 +CWJAP:X 错误码 */
         else if (got_fail || got_cwjap_err)
         {
-            char *err = strstr(resp_buf, "+CWJAP:");
-            if (err)
+            if (++s_retry_count < CWJAP_RETRIES)
             {
-                char ec = *(err + 7);
-                switch (ec)
-                {
-                case '1':
-                    esp8266_save_debug("WiFi:timeout");
-                    break;
-                case '2':
-                    esp8266_save_debug("WiFi:bad pwd");
-                    break;
-                case '3':
-                    esp8266_save_debug("WiFi:no AP");
-                    break;
-                case '4':
-                    esp8266_save_debug("WiFi:conn fail");
-                    break;
-                default:
-                    esp8266_save_debug("WiFi:unknown");
-                    break;
-                }
+                esp8266_set_phase(INIT_CWJAP_SEND);
             }
             else
             {
                 esp8266_save_debug("WiFi:FAIL");
-            }
-            if (++s_retry_count < CWJAP_RETRIES)
-                esp8266_set_phase(INIT_CWJAP_SEND);
-            else
-            {
                 s_status = ESP8266_STATUS_ERROR;
                 esp8266_set_phase(INIT_FAIL);
             }
         }
-        /* ERROR（不伴随 FAIL）：指令可能不被支持，尝试旧版指令 */
         else if (got_err && !got_fail)
         {
             if (!s_use_cwjap_def)
             {
-                s_use_cwjap_def = 1;
-                s_retry_count = 0;
+                s_use_cwjap_def = 1u;
+                s_retry_count = 0u;
                 esp8266_save_debug("try CWJAP_DEF");
                 esp8266_set_phase(INIT_CWJAP_SEND);
             }
@@ -877,12 +1178,13 @@ void esp8266_poll(void)
                 esp8266_set_phase(INIT_FAIL);
             }
         }
-        /* 超时 */
         else if (esp8266_phase_timeout(CWJAP_TIMEOUT))
         {
-            esp8266_save_debug("WiFi:timeout");
             if (++s_retry_count < CWJAP_RETRIES)
+            {
+                esp8266_save_debug("WiFi:timeout");
                 esp8266_set_phase(INIT_CWJAP_SEND);
+            }
             else
             {
                 s_status = ESP8266_STATUS_ERROR;
@@ -892,10 +1194,11 @@ void esp8266_poll(void)
         break;
     }
 
-    /* -------- 查询 IP 地址 -------- */
     case INIT_CIFSR_SEND:
-        esp8266_send_cmd("AT+CIFSR");
-        esp8266_set_phase(INIT_CIFSR_WAIT);
+        if (esp8266_send_cmd_now("AT+CIFSR"))
+        {
+            esp8266_set_phase(INIT_CIFSR_WAIT);
+        }
         break;
 
     case INIT_CIFSR_WAIT:
@@ -903,11 +1206,14 @@ void esp8266_poll(void)
         {
             parse_cifsr_ip();
             if (s_ip_addr[0] != '\0')
+            {
                 snprintf(s_debug_msg, sizeof(s_debug_msg), "IP:%s", s_ip_addr);
+            }
             else
             {
                 esp8266_save_debug("IP:parse fail");
             }
+
             s_status = ESP8266_STATUS_WIFI_GOT_IP;
             esp8266_set_phase(INIT_COMPLETE);
         }
@@ -918,7 +1224,6 @@ void esp8266_poll(void)
         }
         break;
 
-    /* -------- 完成 / 失败（只执行一次） -------- */
     case INIT_COMPLETE:
         s_phase = (init_phase_t)0xFF;
         break;
@@ -930,15 +1235,43 @@ void esp8266_poll(void)
     default:
         break;
     }
-
-    /* 先做 TCP 断链监测，再驱动 TCP 非阻塞状态机 */
-    tcp_link_monitor();
-
-    /* 驱动 TCP 非阻塞状态机 */
-    tcp_poll();
 }
 
-/* ==================== 公共查询接口 ==================== */
+/* ==================== 公共接口 ==================== */
+
+void esp8266_init(void)
+{
+    memset(rx_ring_buf, 0, sizeof(rx_ring_buf));
+    memset(resp_buf, 0, sizeof(resp_buf));
+    memset(s_ip_addr, 0, sizeof(s_ip_addr));
+    memset(s_debug_msg, 0, sizeof(s_debug_msg));
+    memset(s_tcp_server_ip, 0, sizeof(s_tcp_server_ip));
+    memset(s_uart_tx_buf, 0, sizeof(s_uart_tx_buf));
+
+    esp8266_gpio_init();
+    esp8266_uart_init();
+    esp8266_tx_queue_reset();
+
+    s_uart_tx_busy = 0u;
+    s_uart_tx_len = 0u;
+    s_status = ESP8266_STATUS_INITIALIZING;
+    s_retry_count = 0u;
+    s_use_cwjap_def = 0u;
+    s_baud_idx = 0u;
+    s_tcp_server_port = 0u;
+    s_tcp_parse_offset = 0u;
+
+    esp8266_set_phase(INIT_POWERON);
+    esp8266_set_tcp_phase(TCP_PHASE_IDLE);
+}
+
+void esp8266_poll(void)
+{
+    init_poll();
+    tcp_link_monitor();
+    tcp_poll();
+    tx_engine_poll();
+}
 
 esp8266_status_t esp8266_get_status(void)
 {
@@ -955,30 +1288,24 @@ const char *esp8266_get_debug_msg(void)
     return s_debug_msg;
 }
 
-/* ==================== 阻塞式 TCP 操作 ==================== */
-
-int esp8266_get_ip(char *buf, uint16_t buf_size)
-{
-    if (esp8266_send_at_blocking("AT+CIFSR", "OK", AT_CMD_TIMEOUT) != 0)
-        return -1;
-    parse_cifsr_ip();
-    if (s_ip_addr[0] != '\0')
-    {
-        strncpy(buf, s_ip_addr, buf_size - 1);
-        buf[buf_size - 1] = '\0';
-        return 0;
-    }
-    return -1;
-}
-
 void esp8266_connect_tcp_async(const char *ip, uint16_t port)
 {
+    if (!ip || ip[0] == '\0')
+        return;
+
     if (s_status < ESP8266_STATUS_WIFI_CONNECTED)
         return;
-    strncpy(s_tcp_server_ip, ip, sizeof(s_tcp_server_ip) - 1);
-    s_tcp_server_ip[sizeof(s_tcp_server_ip) - 1] = '\0';
+
+    strncpy(s_tcp_server_ip, ip, sizeof(s_tcp_server_ip) - 1u);
+    s_tcp_server_ip[sizeof(s_tcp_server_ip) - 1u] = '\0';
     s_tcp_server_port = port;
-    esp8266_set_tcp_phase(TCP_PHASE_CIPMUX_SEND);
+
+    if (s_tcp_phase == TCP_PHASE_IDLE ||
+        s_tcp_phase == TCP_PHASE_DONE_FAIL ||
+        s_tcp_phase == TCP_PHASE_DONE_OK)
+    {
+        esp8266_set_tcp_phase(TCP_PHASE_CIPMUX_SEND);
+    }
 }
 
 int esp8266_tcp_connect_state(void)
@@ -986,51 +1313,156 @@ int esp8266_tcp_connect_state(void)
     switch (s_tcp_phase)
     {
     case TCP_PHASE_DONE_OK:
-        return 1; /* 连接成功 */
+        return 1;
     case TCP_PHASE_DONE_FAIL:
-        return -1; /* 连接失败 */
+        return -1;
     case TCP_PHASE_IDLE:
-        return 0; /* 空闲（未启动） */
+        return 0;
     default:
-        return 0; /* 连接进行中 */
+        return 0;
     }
 }
 
 void esp8266_tcp_send_heartbeat(void)
 {
-    /* 只在 TCP 已连接且状态机空闲时才能发起心跳 */
-    if (s_status != ESP8266_STATUS_TCP_CONNECTED || s_tcp_phase != TCP_PHASE_DONE_OK)
+    if (s_status != ESP8266_STATUS_TCP_CONNECTED)
         return;
+
+    if (s_tcp_phase != TCP_PHASE_DONE_OK)
+        return;
+
+    if (s_tx_phase != TX_ENGINE_IDLE)
+        return;
+
     esp8266_set_tcp_phase(TCP_PHASE_HB_CIPSEND);
 }
 
-int esp8266_disconnect_tcp(void)
+int esp8266_disconnect_tcp_async(void)
 {
-    if (esp8266_send_at_blocking("AT+CIPCLOSE", "OK", AT_CMD_TIMEOUT) == 0)
-    {
-        if (s_status == ESP8266_STATUS_TCP_CONNECTED)
-            s_status = ESP8266_STATUS_WIFI_GOT_IP;
-        return 0;
-    }
-    return -1;
-}
-
-int esp8266_tcp_send(const uint8_t *data, uint16_t len)
-{
-    char cmd[32];
     if (s_status != ESP8266_STATUS_TCP_CONNECTED)
         return -1;
-    snprintf(cmd, sizeof(cmd), "AT+CIPSEND=%u", len);
-    if (esp8266_send_at_blocking(cmd, ">", AT_CMD_TIMEOUT) != 0)
+
+    if (s_tcp_phase != TCP_PHASE_DONE_OK)
         return -1;
-    HAL_UART_Transmit(&huart_esp8266, (uint8_t *)data, len, 2000);
-    uint32_t start = HAL_GetTick();
-    while ((HAL_GetTick() - start) < AT_CMD_TIMEOUT)
+
+    esp8266_set_tcp_phase(TCP_PHASE_CLOSE_SEND);
+    return 0;
+}
+
+int esp8266_tcp_read_line(char *out, uint16_t out_size)
+{
+    char *base;
+    char *ipd;
+    char *comma;
+    char *colon;
+    char *payload;
+    char *line_end;
+    uint16_t buf_len;
+    uint16_t payload_len;
+    uint16_t avail;
+    uint16_t line_len;
+
+    if (!out || out_size < 2u)
+        return 0;
+
+    out[0] = '\0';
+
+    esp8266_snapshot_resp();
+    buf_len = (uint16_t)strlen(resp_buf);
+    if (buf_len == 0u)
     {
-        esp8266_snapshot_resp();
-        if (strstr(resp_buf, "SEND OK") != NULL)
-            return 0;
-        HAL_Delay(20);
+        s_tcp_parse_offset = 0u;
+        return 0;
     }
-    return -1;
+
+    if (s_tcp_parse_offset >= buf_len)
+    {
+        if (buf_len > 32u)
+            s_tcp_parse_offset = (uint16_t)(buf_len - 32u);
+        else
+            s_tcp_parse_offset = 0u;
+    }
+
+    base = resp_buf + s_tcp_parse_offset;
+    ipd = strstr(base, "+IPD,");
+    if (!ipd)
+        return 0;
+
+    comma = strchr(ipd, ',');
+    colon = strchr(ipd, ':');
+    if (!comma || !colon || colon <= comma)
+        return 0;
+
+    payload_len = (uint16_t)atoi(comma + 1);
+    payload = colon + 1;
+    avail = (uint16_t)(resp_buf + buf_len - payload);
+    if (avail < payload_len)
+        return 0;
+
+    line_end = (char *)memchr(payload, '\n', payload_len);
+    if (!line_end)
+    {
+        s_tcp_parse_offset = (uint16_t)((payload - resp_buf) + payload_len);
+        return 0;
+    }
+
+    line_len = (uint16_t)(line_end - payload);
+    if (line_len > 0u && payload[line_len - 1u] == '\r')
+        line_len--;
+
+    if (line_len == 0u)
+    {
+        s_tcp_parse_offset = (uint16_t)((payload - resp_buf) + payload_len);
+        return 0;
+    }
+
+    if (line_len >= out_size)
+        line_len = (uint16_t)(out_size - 1u);
+
+    memcpy(out, payload, line_len);
+    out[line_len] = '\0';
+
+    s_tcp_parse_offset = (uint16_t)((payload - resp_buf) + payload_len);
+    return 1;
+}
+
+/* ==================== 中断服务 ==================== */
+
+void esp8266_uart_irq_handler(void)
+{
+    HAL_UART_IRQHandler(&huart_esp8266);
+}
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == ESP8266_USART)
+    {
+        s_uart_tx_busy = 0u;
+        s_uart_tx_len = 0u;
+    }
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == ESP8266_USART)
+    {
+        if (rx_write_idx < (ESP8266_RX_BUF_SIZE - 1u))
+            rx_ring_buf[rx_write_idx++] = rx_byte;
+
+        HAL_UART_Receive_IT(&huart_esp8266, &rx_byte, 1);
+    }
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == ESP8266_USART)
+    {
+        s_uart_tx_busy = 0u;
+        s_uart_tx_len = 0u;
+        __HAL_UART_CLEAR_OREFLAG(huart);
+        __HAL_UART_CLEAR_NEFLAG(huart);
+        __HAL_UART_CLEAR_FEFLAG(huart);
+        __HAL_UART_CLEAR_PEFLAG(huart);
+        HAL_UART_Receive_IT(huart, &rx_byte, 1);
+    }
 }

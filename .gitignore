@@ -1,1 +1,4 @@
 build/
+.vscode/
+__pycache__/
+data/audio/

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- 芯片外框 -->
+  <rect x="14" y="14" width="36" height="36" rx="4" ry="4" fill="#2C3E50" stroke="#1A252F" stroke-width="1.5"/>
+  <!-- 芯片引脚 - 上 -->
+  <rect x="22" y="8" width="4" height="8" rx="1" fill="#5D6D7E"/>
+  <rect x="30" y="8" width="4" height="8" rx="1" fill="#5D6D7E"/>
+  <rect x="38" y="8" width="4" height="8" rx="1" fill="#5D6D7E"/>
+  <!-- 芯片引脚 - 下 -->
+  <rect x="22" y="48" width="4" height="8" rx="1" fill="#5D6D7E"/>
+  <rect x="30" y="48" width="4" height="8" rx="1" fill="#5D6D7E"/>
+  <rect x="38" y="48" width="4" height="8" rx="1" fill="#5D6D7E"/>
+  <!-- 芯片引脚 - 左 -->
+  <rect x="8" y="22" width="8" height="4" rx="1" fill="#5D6D7E"/>
+  <rect x="8" y="30" width="8" height="4" rx="1" fill="#5D6D7E"/>
+  <rect x="8" y="38" width="8" height="4" rx="1" fill="#5D6D7E"/>
+  <!-- 芯片引脚 - 右 -->
+  <rect x="48" y="22" width="8" height="4" rx="1" fill="#5D6D7E"/>
+  <rect x="48" y="30" width="8" height="4" rx="1" fill="#5D6D7E"/>
+  <rect x="48" y="38" width="8" height="4" rx="1" fill="#5D6D7E"/>
+  <!-- 芯片内部: 声波图案 (代表语音功能) -->
+  <g stroke="#3498DB" stroke-width="2.2" stroke-linecap="round" fill="none">
+    <line x1="26" y1="28" x2="26" y2="36"/>
+    <line x1="30" y1="24" x2="30" y2="40"/>
+    <line x1="34" y1="26" x2="34" y2="38"/>
+    <line x1="38" y1="29" x2="38" y2="35"/>
+  </g>
+  <!-- 芯片内部小圆点 (定位标记) -->
+  <circle cx="19" cy="19" r="1.5" fill="#5D6D7E"/>
+</svg>

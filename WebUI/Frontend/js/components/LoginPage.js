@@ -31,7 +31,6 @@ export default {
               placeholder="管理员密码"
               show-password
               size="large"
-              @keyup.enter="handleLogin"
               autofocus
             >
               <template #prefix>
@@ -44,10 +43,10 @@ export default {
           </el-form-item>
           <el-button
             type="primary"
+            native-type="submit"
             size="large"
             style="width:100%;height:42px;font-weight:600;"
             :loading="loading"
-            @click="handleLogin"
           >登 录</el-button>
         </el-form>
       </div>
@@ -58,6 +57,7 @@ export default {
     const loading = ref(false);
 
     const handleLogin = async () => {
+      if (loading.value) return;
       const pw = (password.value || '').trim();
       if (!pw) { ElMessage.warning('请输入密码'); return; }
       loading.value = true;

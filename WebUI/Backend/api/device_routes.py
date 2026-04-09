@@ -12,6 +12,31 @@ logger = logging.getLogger(__name__)
 device_bp = Blueprint("device", __name__, url_prefix="/api")
 
 
+def _build_llm_candidate_urls(base_url: str) -> list[str]:
+    """根据用户配置生成可尝试的 chat completions URL 列表。"""
+    url = (base_url or "").strip().rstrip("/")
+    if not url:
+        return []
+
+    if url.endswith("/chat/completions"):
+        return [url]
+
+    candidates = []
+    if url.endswith("/v1"):
+        candidates.append(url + "/chat/completions")
+    else:
+        candidates.append(url + "/v1/chat/completions")
+        candidates.append(url + "/chat/completions")
+
+    unique = []
+    seen = set()
+    for item in candidates:
+        if item not in seen:
+            seen.add(item)
+            unique.append(item)
+    return unique
+
+
 @device_bp.route("/test/device", methods=["POST"])
 @require_auth
 def test_device_connection():
@@ -188,13 +213,6 @@ def test_llm_connection():
     model = body.get("model") or model
 
     try:
-        url = base_url.rstrip("/")
-        # 拼接 chat completions 端点
-        if url.endswith("/v1"):
-            chat_url = url + "/chat/completions"
-        else:
-            chat_url = url + "/v1/chat/completions"
-
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -205,25 +223,40 @@ def test_llm_connection():
             "max_tokens": 5,
         }
 
+        last_resp = None
         with httpx.Client(timeout=15) as client:
-            resp = client.post(chat_url, json=payload, headers=headers)
+            for chat_url in _build_llm_candidate_urls(base_url):
+                resp = client.post(chat_url, json=payload, headers=headers)
+                last_resp = resp
 
-        if resp.status_code == 200:
-            data = resp.json()
-            reply = ""
-            if "choices" in data and data["choices"]:
-                reply = data["choices"][0].get("message", {}).get("content", "")
-            return jsonify({
-                "success": True,
-                "message": f"大模型连接成功 (模型: {model})",
-                "reply": reply,
-            })
-        else:
-            err_text = resp.text[:300]
+                # 404/405 通常代表路径不匹配，继续尝试下一个候选 URL
+                if resp.status_code in (404, 405):
+                    continue
+
+                if resp.status_code == 200:
+                    data = resp.json()
+                    reply = ""
+                    if "choices" in data and data["choices"]:
+                        reply = data["choices"][0].get("message", {}).get("content", "")
+                    return jsonify({
+                        "success": True,
+                        "message": f"大模型连接成功 (模型: {model})",
+                        "reply": reply,
+                    })
+
+                err_text = resp.text[:300]
+                return jsonify({
+                    "success": False,
+                    "message": f"API 返回 {resp.status_code}: {err_text}",
+                })
+
+        if last_resp is not None:
+            err_text = last_resp.text[:300]
             return jsonify({
                 "success": False,
-                "message": f"API 返回 {resp.status_code}: {err_text}",
+                "message": f"API 返回 {last_resp.status_code}: {err_text}",
             })
+        return jsonify({"success": False, "message": "未生成可用的 LLM 请求地址"})
     except httpx.ConnectError:
         return jsonify({"success": False, "message": f"无法连接到 {base_url}"})
     except httpx.TimeoutException:

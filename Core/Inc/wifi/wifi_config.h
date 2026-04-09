@@ -16,7 +16,7 @@
 /* ===================== 服务器地址配置 ===================== */
 
 /* 云端服务器 IP 地址 */
-#define SERVER_IP "10.254.59.245"
+#define SERVER_IP "10.23.249.245"
 
 /* 云端服务器端口号 */
 #define SERVER_PORT 8266
@@ -25,7 +25,7 @@
 
 /* ESP8266 使用的串口: USART3 (PB10=TX, PB11=RX)，焊接在开发板上 */
 #define ESP8266_USART USART3
-#define ESP8266_USART_BAUDRATE 115200
+#define ESP8266_USART_BAUDRATE 460800
 
 #define ESP8266_USART_CLK_ENABLE() __HAL_RCC_USART3_CLK_ENABLE()
 #define ESP8266_USART_IRQn USART3_IRQn
@@ -53,7 +53,7 @@
 /* WiFi 连接超时（毫秒），热点连接较慢需要更长时间 */
 #define ESP8266_WIFI_JOIN_TIMEOUT 15000
 
-/* 串口接收环形缓冲区大小 */
-#define ESP8266_RX_BUF_SIZE 512
+/* 串口接收线性缓冲区大小（增大避免 AT 响应溢出丢失导致误判断连） */
+#define ESP8266_RX_BUF_SIZE 1024
 
 #endif /* __WIFI_CONFIG_H */

@@ -13,6 +13,8 @@ import ConversationHistory from '/static/js/components/ConversationHistory.js';
 import AdvancedSettings    from '/static/js/components/AdvancedSettings.js';
 import SecurityPanel       from '/static/js/components/SecurityPanel.js';
 import SecuritySettings    from '/static/js/components/SecuritySettings.js';
+import UserSettings        from '/static/js/components/UserSettings.js';
+import MicTest             from '/static/js/components/MicTest.js';
 
 const { createApp, ref, computed, onMounted } = Vue;
 const { ElMessage } = ElementPlus;
@@ -35,6 +37,8 @@ const ICONS = {
 
 const NAV_ITEMS = [
   { key: 'status',    label: '概览',       icon: 'dashboard', section: '监控' },
+  { key: 'mictest',   label: '麦克风',     icon: 'mic',       section: '配置' },
+  { key: 'user',      label: '用户设置',   icon: 'device',    section: '配置' },
   { key: 'device',    label: '设备通信',   icon: 'device',    section: '配置' },
   { key: 'speech',    label: '语音识别',   icon: 'mic',       section: '配置' },
   { key: 'llm',       label: '大模型',     icon: 'openai',    section: '配置' },
@@ -160,6 +164,7 @@ const App = {
       llm:      { base_url: '', api_key: '', model: 'gpt-4', system_prompt: '', max_tokens: 512, temperature: 0.7 },
       tts:      { provider: 'openai_tts', base_url: '', api_key: '', model: 'tts-1', voice: 'alloy' },
       advanced: { service_port: 5000, log_level: 'INFO', session_expiry_hours: 24, max_history_per_session: 50, audio_buffer_timeout_sec: 30 },
+      user:     { username: 'User', avatar: '' },
     });
 
     const status = ref({ device_connected: false, device_info: '', connected_clients: 0, tcp_port: 8266, device_name: 'STM32F103VET6' });
@@ -203,6 +208,8 @@ const App = {
 
     const tabMap = {
       status:   StatusPanel,
+      mictest:  MicTest,
+      user:     UserSettings,
       device:   DeviceConfig,
       speech:   SpeechConfig,
       llm:      LLMConfig,
@@ -216,15 +223,29 @@ const App = {
     // ---- Config ----
     const loadConfig = async () => {
       try {
-        const resp = await api.getConfig();
+        const [resp, user] = await Promise.all([
+          api.getConfig(),
+          api.getUserSettings(),
+        ]);
         if (resp.data) config.value = resp.data;
+        config.value.user = {
+          username: user.username || 'User',
+          avatar: user.avatar || '',
+        };
       } catch {}
     };
 
     const saveConfig = async () => {
       saving.value = true;
       try {
-        await api.saveConfig(config.value);
+        const { user, ...coreConfig } = config.value;
+        await Promise.all([
+          api.saveConfig(coreConfig),
+          api.saveUserSettings({
+            username: (user?.username || 'User').trim() || 'User',
+            avatar: user?.avatar || '',
+          }),
+        ]);
         ElMessage.success('配置已保存');
       } catch {}
       finally { saving.value = false; }
@@ -272,4 +293,6 @@ app.component('ConversationHistory', ConversationHistory);
 app.component('AdvancedSettings', AdvancedSettings);
 app.component('SecurityPanel', SecurityPanel);
 app.component('SecuritySettings', SecuritySettings);
+app.component('UserSettings', UserSettings);
+app.component('MicTest', MicTest);
 app.mount('#app');

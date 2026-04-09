@@ -82,8 +82,9 @@ class Config:
                         "tcp_port": 8266,
                         "tcp_host": "0.0.0.0",
                         "device_name": "STM32F103VET6",
-                        "audio_sample_rate": 16000,
-                        "audio_bit_depth": 16
+                        "audio_sample_rate": 32000,
+                        "audio_bit_depth": 16,
+                        "audio_upload_downsample": 4
                     },
                     "speech": {
                         "provider": "tencent",
