@@ -52,6 +52,7 @@ Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash_ex.c \
 Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_exti.c \
 Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_spi.c \
 Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_uart.c \
+Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_i2s.c \
 Core/Src/system_stm32f1xx.c \
 Core/Src/sysmem.c \
 Core/Src/syscalls.c \
@@ -60,7 +61,17 @@ Core/Src/lcd/font.c \
 Core/Src/lcd/display.c \
 Core/Src/bsp/bsp_key.c \
 Core/Src/bsp/bsp_spi_flash.c \
+Core/Src/bsp/button_event.c \
 Core/Src/wifi/esp8266.c \
+Core/Src/debug/debug_uart.c \
+Core/Src/audio/audio_buffer.c \
+Core/Src/audio/microphone.c \
+Core/Src/audio/audio_processor.c \
+Core/Src/audio/audio_quality.c \
+Core/Src/audio/dsp_config.c \
+Core/Src/system/system_state.c \
+Core/Src/system/system_controller.c \
+Core/Src/cloud/cloud_comm.c
 Core/Src/debug/debug_uart.c \
 Core/Src/audio/i2s_mic.c \
 Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_i2s.c
@@ -130,6 +141,8 @@ C_INCLUDES =  \
 -ICore/Inc/wifi \
 -ICore/Inc/debug \
 -ICore/Inc/audio \
+-ICore/Inc/system \
+-ICore/Inc/cloud \
 -IDrivers/STM32F1xx_HAL_Driver/Inc/Legacy \
 -IDrivers/STM32F1xx_HAL_Driver/Inc \
 -IDrivers/CMSIS/Device/ST/STM32F1xx/Include \
@@ -157,8 +170,8 @@ CFLAGS += -MMD -MP -MF"$(@:%.o=%.d)"
 LDSCRIPT = STM32F103XX_FLASH.ld
 
 # libraries
-LIBS = -lc -lm -lnosys 
-LIBDIR = 
+LIBS = -lc -lm -lnosys -larm_cortexM3l_math
+LIBDIR = -LDrivers/CMSIS/Lib/GCC
 LDFLAGS = $(MCU) -specs=nano.specs -T$(LDSCRIPT) $(LIBDIR) $(LIBS) -Wl,-Map=$(BUILD_DIR)/$(TARGET).map,--cref -Wl,--gc-sections
 
 # default action: build all

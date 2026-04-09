@@ -30,6 +30,7 @@ static UART_HandleTypeDef huart_esp8266;
 /* 接收缓冲区 */
 static uint8_t rx_ring_buf[ESP8266_RX_BUF_SIZE];
 static volatile uint16_t rx_write_idx;
+static volatile uint16_t rx_read_idx;
 
 /* 单字节接收缓存，中断逐字节接收 */
 static uint8_t rx_byte;
@@ -383,6 +384,7 @@ static void esp8266_uart_init(void)
     HAL_NVIC_EnableIRQ(ESP8266_USART_IRQn);
 
     rx_write_idx = 0;
+    rx_read_idx = 0;
     HAL_UART_Receive_IT(&huart_esp8266, &rx_byte, 1);
 }
 
