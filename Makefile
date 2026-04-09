@@ -65,16 +65,13 @@ Core/Src/bsp/button_event.c \
 Core/Src/wifi/esp8266.c \
 Core/Src/debug/debug_uart.c \
 Core/Src/audio/audio_buffer.c \
-Core/Src/audio/microphone.c \
 Core/Src/audio/audio_processor.c \
 Core/Src/audio/audio_quality.c \
 Core/Src/audio/dsp_config.c \
 Core/Src/system/system_state.c \
 Core/Src/system/system_controller.c \
-Core/Src/cloud/cloud_comm.c
-Core/Src/debug/debug_uart.c \
-Core/Src/audio/i2s_mic.c \
-Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_i2s.c
+Core/Src/cloud/cloud_comm.c \
+Core/Src/audio/i2s_mic.c
 
 # ASM sources
 ASM_SOURCES =  \

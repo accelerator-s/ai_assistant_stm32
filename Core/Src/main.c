@@ -827,6 +827,7 @@ int main(void)
             last_hb_tick = HAL_GetTick();
         }
 
+        bsp_key_update();  /* 更新按键状态 */
         audio_upload_poll();
         try_send_rec_end();
         try_send_mic_rec_done();

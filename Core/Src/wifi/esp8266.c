@@ -1325,18 +1325,19 @@ int esp8266_tcp_connect_state(void)
     }
 }
 
-void esp8266_tcp_send_heartbeat(void)
+int esp8266_tcp_send_heartbeat(void)
 {
     if (s_status != ESP8266_STATUS_TCP_CONNECTED)
-        return;
+        return 0;
 
     if (s_tcp_phase != TCP_PHASE_DONE_OK)
-        return;
+        return 0;
 
     if (s_tx_phase != TX_ENGINE_IDLE)
-        return;
+        return 0;
 
     esp8266_set_tcp_phase(TCP_PHASE_HB_CIPSEND);
+    return 1;
 }
 
 int esp8266_disconnect_tcp_async(void)
