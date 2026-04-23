@@ -55,6 +55,7 @@ def create_app() -> Flask:
     from .api.device_routes import device_bp
     from .api.mic_test_routes import mic_test_bp
     from .api.security_routes import security_bp
+    from .api.speaker_test_routes import speaker_test_bp
     from .api.user_routes import user_bp
 
     app.register_blueprint(auth_bp)
@@ -65,6 +66,7 @@ def create_app() -> Flask:
     app.register_blueprint(user_bp, url_prefix="/api/user")
     app.register_blueprint(chat_bp, url_prefix="/api/chat")
     app.register_blueprint(mic_test_bp, url_prefix="/api/test/mic")
+    app.register_blueprint(speaker_test_bp, url_prefix="/api/test/speaker")
 
     # ---- 安全中间件 ----
     @app.before_request
@@ -81,7 +83,13 @@ def create_app() -> Flask:
         # 速率限制（仅对 API 端点）
         if request.path.startswith("/api/"):
             # 异步任务轮询端点需要高频访问，避免误触发全局限流
-            if request.path.startswith("/api/test/mic/jobs/") and request.method == "GET":
+            if (
+                (
+                    request.path.startswith("/api/test/mic/jobs/")
+                    or request.path.startswith("/api/test/speaker/jobs/")
+                )
+                and request.method == "GET"
+            ):
                 return None
 
             limiter = app_state.get("rate_limiter")

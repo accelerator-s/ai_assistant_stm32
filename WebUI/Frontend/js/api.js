@@ -99,6 +99,18 @@ const api = {
   cancelMicTestJob(jobId) {
     return http.delete(`/test/mic/jobs/${jobId}`).then((r) => r.data);
   },
+  getSpeakerTestCases() {
+    return http.get("/test/speaker/cases").then((r) => r.data);
+  },
+  runSpeakerTestCase(caseId) {
+    return http.post(`/test/speaker/run/${caseId}`).then((r) => r.data);
+  },
+  getSpeakerTestJob(jobId) {
+    return http.get(`/test/speaker/jobs/${jobId}`).then((r) => r.data);
+  },
+  cancelSpeakerTestJob(jobId) {
+    return http.delete(`/test/speaker/jobs/${jobId}`).then((r) => r.data);
+  },
   async waitMicTestJob(
     jobId,
     { interval = 500, timeout = 30000, onProgress = null } = {},
