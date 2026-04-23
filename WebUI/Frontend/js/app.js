@@ -40,7 +40,7 @@ const ICONS = {
 const NAV_ITEMS = [
   { key: 'status',    label: '概览',       icon: 'dashboard', section: '监控' },
   { key: 'mictest',   label: '麦克风',     icon: 'mic',       section: '配置' },
-  { key: 'speaker',   label: '音响测试',   icon: 'speaker',   section: '配置' },
+  { key: 'speaker',   label: '音响',       icon: 'speaker',   section: '配置' },
   { key: 'user',      label: '用户设置',   icon: 'device',    section: '配置' },
   { key: 'device',    label: '设备通信',   icon: 'device',    section: '配置' },
   { key: 'speech',    label: '语音识别',   icon: 'mic',       section: '配置' },
