@@ -1,6 +1,5 @@
 """设备通信与服务测试 API 路由"""
 
-import socket
 import logging
 import httpx
 from flask import Blueprint, request, jsonify
@@ -63,25 +62,19 @@ def test_device_connection():
             ),
         })
 
-    # 尝试检查 TCP 端口是否正在监听
+    # 只查询设备管理器状态，不再用本机 socket 反连 TCP 端口。
+    # 反连会被 accept_loop 误记为一次设备连接，造成“连上就断开”的假日志。
     tcp_port = config.get("device.tcp_port", 8266)
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(3)
-        result = sock.connect_ex(("127.0.0.1", tcp_port))
-        sock.close()
-        if result == 0:
-            return jsonify({
-                "success": True,
-                "message": f"TCP 端口 {tcp_port} 已在监听，等待设备连接",
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "message": f"TCP 端口 {tcp_port} 未监听，请检查设备通信服务",
-            })
-    except Exception as e:
-        return jsonify({"success": False, "message": f"连接测试失败: {str(e)}"})
+    if device_mgr and device_mgr.is_running():
+        return jsonify({
+            "success": True,
+            "message": f"TCP 服务器已启动，监听端口 {tcp_port}，等待设备连接",
+        })
+
+    return jsonify({
+        "success": False,
+        "message": f"TCP 服务器未运行，请检查设备通信服务（端口 {tcp_port}）",
+    })
 
 
 @device_bp.route("/test/speech", methods=["POST"])

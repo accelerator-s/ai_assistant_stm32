@@ -76,6 +76,9 @@ static uint8_t k1_no_tcp_hint_latched = 0;
 
 #define WIFI_COLOR_CONNECTED COLOR_ACCENT_GREEN
 #define WIFI_COLOR_DISCONNECTED COLOR_ICON_MIC
+#define WIFI_COLOR_CONNECTING COLOR_ORANGE
+#define WIFI_COLOR_IP_READY COLOR_YELLOW
+#define WIFI_COLOR_TCP_TRY COLOR_CYAN
 
 static int16_t audio_upload_buffer[AUDIO_UPLOAD_BUFFER_SAMPLES];
 static volatile uint16_t audio_upload_write_pos = 0;
@@ -113,6 +116,11 @@ static uint32_t mic_rec_test_duration_ms = 3000u;
 
 static void audio_upload_poll(void);
 static void try_send_rec_end(void);
+static void update_network_debug_display(esp8266_status_t wifi_st,
+                                         uint8_t tcp_async_started,
+                                         int tcp_conn_state,
+                                         uint8_t tcp_fail_latched,
+                                         const char *ip_text);
 
 /* ===================== 工具函数 ===================== */
 
@@ -284,6 +292,190 @@ static void mic_rec_test_poll(void)
     if ((HAL_GetTick() - mic_rec_test_start_tick) >= mic_rec_test_duration_ms)
     {
         mic_rec_test_finish();
+    }
+}
+
+/* ===================== 网络状态屏幕调试 ===================== */
+
+static uint16_t network_status_color(esp8266_status_t wifi_st,
+                                     uint8_t tcp_async_started,
+                                     int tcp_conn_state,
+                                     uint8_t tcp_fail_latched)
+{
+    if (wifi_st == ESP8266_STATUS_TCP_CONNECTED || tcp_conn_state == 1)
+        return WIFI_COLOR_CONNECTED;
+
+    if (tcp_async_started)
+        return WIFI_COLOR_TCP_TRY;
+
+    if (tcp_fail_latched || wifi_st == ESP8266_STATUS_ERROR)
+        return WIFI_COLOR_DISCONNECTED;
+
+    if (wifi_st == ESP8266_STATUS_WIFI_GOT_IP)
+        return WIFI_COLOR_IP_READY;
+
+    if (wifi_st == ESP8266_STATUS_CONNECTING_WIFI ||
+        wifi_st == ESP8266_STATUS_WIFI_CONNECTED)
+        return WIFI_COLOR_CONNECTING;
+
+    return COLOR_TEXT_SECONDARY;
+}
+
+static const char *network_status_label(esp8266_status_t wifi_st,
+                                        uint8_t tcp_async_started,
+                                        int tcp_conn_state,
+                                        uint8_t tcp_fail_latched)
+{
+    if (wifi_st == ESP8266_STATUS_TCP_CONNECTED || tcp_conn_state == 1)
+        return "TCP OK";
+
+    if (tcp_async_started)
+        return "TCP TRY";
+
+    if (tcp_fail_latched)
+        return "TCP FAIL";
+
+    switch (wifi_st)
+    {
+    case ESP8266_STATUS_IDLE:
+        return "ESP IDLE";
+    case ESP8266_STATUS_INITIALIZING:
+        return "ESP INIT";
+    case ESP8266_STATUS_READY:
+        return "ESP READY";
+    case ESP8266_STATUS_CONNECTING_WIFI:
+        return "WiFi JOIN";
+    case ESP8266_STATUS_WIFI_CONNECTED:
+        return "WiFi OK";
+    case ESP8266_STATUS_WIFI_GOT_IP:
+        return "IP OK";
+    case ESP8266_STATUS_ERROR:
+    {
+        const char *dbg = esp8266_get_debug_msg();
+        if (dbg && strstr(dbg, "AT:baud fail") != NULL)
+            return "AT FAIL";
+        if (dbg && strstr(dbg, "UART_DEF fail") != NULL)
+            return "UART FAIL";
+        return "ESP ERR";
+    }
+    default:
+        return "NET ?";
+    }
+}
+
+static void network_status_detail(esp8266_status_t wifi_st,
+                                  uint8_t tcp_async_started,
+                                  int tcp_conn_state,
+                                  uint8_t tcp_fail_latched,
+                                  const char *ip_text,
+                                  char *out,
+                                  size_t out_size)
+{
+    const char *dbg = esp8266_get_debug_msg();
+    const char *ip = (ip_text && ip_text[0] != '\0') ? ip_text : "-";
+
+    if (!out || out_size == 0u)
+        return;
+
+    out[0] = '\0';
+
+    if (wifi_st == ESP8266_STATUS_TCP_CONNECTED || tcp_conn_state == 1)
+    {
+        snprintf(out, out_size, "TCP OK %s:%u", SERVER_IP, (unsigned)SERVER_PORT);
+        return;
+    }
+
+    if (tcp_async_started)
+    {
+        snprintf(out, out_size, "TCP>%s:%u", SERVER_IP, (unsigned)SERVER_PORT);
+        return;
+    }
+
+    if (tcp_fail_latched)
+    {
+        snprintf(out, out_size, "TCP FAIL %s", (dbg && dbg[0] != '\0') ? dbg : "no resp");
+        return;
+    }
+
+    switch (wifi_st)
+    {
+    case ESP8266_STATUS_INITIALIZING:
+        snprintf(out, out_size, "ESP init %s", (dbg && dbg[0] != '\0') ? dbg : "");
+        break;
+    case ESP8266_STATUS_READY:
+        snprintf(out, out_size, "ESP ready");
+        break;
+    case ESP8266_STATUS_CONNECTING_WIFI:
+        snprintf(out, out_size, "WiFi join:%s", WIFI_SSID);
+        break;
+    case ESP8266_STATUS_WIFI_CONNECTED:
+        snprintf(out, out_size, "WiFi ok, wait IP");
+        break;
+    case ESP8266_STATUS_WIFI_GOT_IP:
+        snprintf(out, out_size, "IP:%s", ip);
+        break;
+    case ESP8266_STATUS_ERROR:
+        snprintf(out, out_size, "ESP ERR %s", (dbg && dbg[0] != '\0') ? dbg : "");
+        break;
+    default:
+        snprintf(out, out_size, "NET idle");
+        break;
+    }
+}
+
+static void update_network_debug_display(esp8266_status_t wifi_st,
+                                         uint8_t tcp_async_started,
+                                         int tcp_conn_state,
+                                         uint8_t tcp_fail_latched,
+                                         const char *ip_text)
+{
+    static char last_label[16] = "";
+    static char last_detail[64] = "";
+    static uint16_t last_color = 0u;
+    static uint32_t last_idle_detail_tick = 0u;
+
+    const char *label = network_status_label(wifi_st, tcp_async_started,
+                                             tcp_conn_state, tcp_fail_latched);
+    uint16_t color = network_status_color(wifi_st, tcp_async_started,
+                                          tcp_conn_state, tcp_fail_latched);
+    char detail[64];
+    uint8_t label_changed;
+    uint8_t detail_changed;
+
+    network_status_detail(wifi_st, tcp_async_started, tcp_conn_state,
+                          tcp_fail_latched, ip_text, detail, sizeof(detail));
+
+    label_changed = (strcmp(last_label, label) != 0 || last_color != color) ? 1u : 0u;
+    detail_changed = (strcmp(last_detail, detail) != 0) ? 1u : 0u;
+
+    if (label_changed)
+    {
+        display_update_wifi(label, color);
+        strncpy(last_label, label, sizeof(last_label) - 1u);
+        last_label[sizeof(last_label) - 1u] = '\0';
+        last_color = color;
+    }
+
+    if (detail_changed)
+    {
+        display_push_debug_line(detail);
+        strncpy(last_detail, detail, sizeof(last_detail) - 1u);
+        last_detail[sizeof(last_detail) - 1u] = '\0';
+    }
+
+    if (sys_state == STATE_IDLE &&
+        (wifi_st != ESP8266_STATUS_TCP_CONNECTED || tcp_async_started || tcp_fail_latched) &&
+        (detail_changed || (HAL_GetTick() - last_idle_detail_tick) >= 2000u))
+    {
+        display_update_bottom_hint(detail);
+        last_idle_detail_tick = HAL_GetTick();
+    }
+    else if (sys_state == STATE_IDLE &&
+             wifi_st == ESP8266_STATUS_TCP_CONNECTED &&
+             detail_changed)
+    {
+        display_update_bottom_hint("K1:录音 K2:发送/新建");
+        last_idle_detail_tick = HAL_GetTick();
     }
 }
 
@@ -580,7 +772,7 @@ static void handle_idle(key_event_t k2_ev)
     if (k2_ev == KEY_EVENT_K2_SHORT)
     {
         display_clear_messages();
-        display_update_title("新对话");
+        display_update_title("新对话1");
         display_show_system_hint("新会话已开启");
         (void)esp8266_tcp_send_line_async("NEW_SESSION");
         return;
@@ -709,13 +901,13 @@ int main(void)
 
     esp8266_init();
 
-    display_update_wifi("wifi未连接", WIFI_COLOR_DISCONNECTED);
+    display_update_wifi("ESP INIT", WIFI_COLOR_CONNECTING);
     display_show_system_hint("语音助手已启动");
 
-    esp8266_status_t last_wifi_st = (esp8266_status_t)0xFF;
     char last_ip[20] = {0};
     uint32_t last_tcp_try_tick = 0;
     uint8_t tcp_async_started = 0;
+    uint8_t tcp_fail_latched = 0;
     uint32_t last_hb_tick = 0;
     int last_tcp_conn_state = 0;
 
@@ -729,24 +921,6 @@ int main(void)
         mic_rec_test_poll();
 
         esp8266_status_t wifi_st = esp8266_get_status();
-        if (wifi_st != last_wifi_st)
-        {
-            switch (wifi_st)
-            {
-            case ESP8266_STATUS_TCP_CONNECTED:
-                display_update_wifi("已连接", WIFI_COLOR_CONNECTED);
-                if (sys_state == STATE_IDLE)
-                {
-                    display_update_bottom_hint("K1:录音 K2:发送/新建");
-                }
-                break;
-
-            default:
-                display_update_wifi("未连接", WIFI_COLOR_DISCONNECTED);
-                break;
-            }
-            last_wifi_st = wifi_st;
-        }
 
         {
             const char *cur_ip = esp8266_get_ip_cached();
@@ -766,44 +940,36 @@ int main(void)
             debug_printf("[TCP] async start %s:%u\r\n", SERVER_IP, (unsigned)SERVER_PORT);
             esp8266_connect_tcp_async(SERVER_IP, SERVER_PORT);
             tcp_async_started = 1;
+            tcp_fail_latched = 0;
             last_tcp_try_tick = HAL_GetTick();
             last_tcp_conn_state = 0;
-            display_update_wifi("未连接", WIFI_COLOR_DISCONNECTED);
         }
 
         if (tcp_async_started)
         {
             int tcp_st = esp8266_tcp_connect_state();
 
-            if (tcp_st != last_tcp_conn_state)
-            {
-                if (tcp_st == 1)
-                {
-                    display_update_wifi("已连接", WIFI_COLOR_CONNECTED);
-                }
-                else
-                {
-                    display_update_wifi("未连接", WIFI_COLOR_DISCONNECTED);
-                }
-                last_tcp_conn_state = tcp_st;
-            }
-
             if (tcp_st == 1)
             {
                 debug_printf("[TCP] async connected\r\n");
+                tcp_fail_latched = 0;
                 tcp_async_started = 0;
             }
             else if (tcp_st == -1)
             {
                 debug_printf("[TCP] async failed: %s\r\n", esp8266_get_debug_msg());
+                tcp_fail_latched = 1;
                 tcp_async_started = 0;
                 last_tcp_try_tick = HAL_GetTick();
             }
+
+            last_tcp_conn_state = tcp_st;
         }
 
         if (wifi_st == ESP8266_STATUS_TCP_CONNECTED)
         {
             tcp_async_started = 0;
+            tcp_fail_latched = 0;
             last_tcp_conn_state = 1;
         }
         else if (wifi_st == ESP8266_STATUS_WIFI_CONNECTED ||
@@ -811,14 +977,19 @@ int main(void)
         {
             if (!tcp_async_started)
             {
-                last_tcp_conn_state = 0;
+                last_tcp_conn_state = tcp_fail_latched ? -1 : 0;
             }
         }
         else
         {
             tcp_async_started = 0;
+            tcp_fail_latched = 0;
             last_tcp_conn_state = 0;
         }
+
+        update_network_debug_display(wifi_st, tcp_async_started,
+                                     last_tcp_conn_state, tcp_fail_latched,
+                                     last_ip);
 
         if (wifi_st == ESP8266_STATUS_TCP_CONNECTED &&
             ((HAL_GetTick() - last_hb_tick) >= HEARTBEAT_INTERVAL_MS))

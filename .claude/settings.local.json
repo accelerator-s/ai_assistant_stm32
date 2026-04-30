@@ -6,7 +6,18 @@
       "Bash(make clean:*)",
       "Bash(make)",
       "Bash(python -c \"import sys; print\\(''Python路径正常''\\); print\\(''当前目录:'', sys.path[0]\\)\")",
-      "Bash(find E:stm32ai_assistant_stm32 -name *cmsis*dsp* -o -name *arm_math*)"
+      "Bash(find E:stm32ai_assistant_stm32 -name *cmsis*dsp* -o -name *arm_math*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(python run.py)",
+      "Bash(findstr :8266)",
+      "Bash(netsh advfirewall:*)",
+      "Bash(findstr \"8266\")",
+      "Bash(git stash:*)",
+      "Bash(taskkill:*)",
+      "Bash(wmic process:*)",
+      "Bash(python:*)",
+      "Bash(git *)"
     ]
   }
 }

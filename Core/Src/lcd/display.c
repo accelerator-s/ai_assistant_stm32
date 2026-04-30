@@ -28,7 +28,7 @@ static uint8_t msg_head = 0;  /* 环形缓冲区头部 */
 static char username[32] = "User";
 
 /* 会话标题缓存 */
-static char session_title[32] = "新对话";
+static char session_title[32] = "新对话1";
 static char wifi_status_text[32] = "wifi未连接";
 static uint16_t wifi_status_color = COLOR_TEXT_DIM;
 
