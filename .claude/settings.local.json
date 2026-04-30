@@ -13,7 +13,11 @@
       "Bash(findstr :8266)",
       "Bash(netsh advfirewall:*)",
       "Bash(findstr \"8266\")",
-      "Bash(git stash:*)"
+      "Bash(git stash:*)",
+      "Bash(taskkill:*)",
+      "Bash(wmic process:*)",
+      "Bash(python:*)",
+      "Bash(git *)"
     ]
   }
 }

@@ -71,7 +71,6 @@ typedef enum
     INIT_CWMODE_WAIT,
     INIT_UART_DEF_SEND, /* 切换 ESP8266 到目标波特率 */
     INIT_UART_DEF_WAIT,
-    INIT_UART_SWITCH_WAIT, /* 等待本地切换波特率 */
     INIT_CWJAP_SEND,       /* 连接 WiFi */
     INIT_CWJAP_WAIT,
     INIT_CIFSR_SEND, /* 查询 IP */
@@ -85,13 +84,8 @@ static uint32_t s_phase_tick;
 static uint8_t s_retry_count;
 static uint8_t s_use_cwjap_def;
 
-/* 自动波特率探测: 优先 115200，兼容 ESP8266 Flash 中可能残留的 460800 */
-static const uint32_t s_baud_table[] = {115200u, 460800u, 9600u, 57600u};
-#define BAUD_TABLE_SIZE (sizeof(s_baud_table) / sizeof(s_baud_table[0]))
-static uint8_t s_baud_idx;
-
 /* 时序常量 */
-#define AT_PER_BAUD_RETRIES 3u
+#define AT_RETRIES 3u
 #define AT_TEST_TIMEOUT 1000u
 #define AT_CMD_TIMEOUT 3000u
 #define RST_TIMEOUT 5000u
@@ -100,7 +94,6 @@ static uint8_t s_baud_idx;
 #define POWERON_DELAY 2000u
 #define HW_RST_LOW_MS 200u
 #define HW_RST_POST_MS 50u
-#define UART_SWITCH_DELAY_MS 100u
 #define TCP_CONNECT_TIMEOUT 10000u
 
 /* ==================== TCP 连接状态机 ==================== */
@@ -198,6 +191,14 @@ static void esp8266_save_debug(const char *msg)
     }
     strncpy(s_debug_msg, msg, sizeof(s_debug_msg) - 1);
     s_debug_msg[sizeof(s_debug_msg) - 1] = '\0';
+}
+
+static void esp8266_save_baud_debug(const char *prefix)
+{
+    char msg[32];
+
+    snprintf(msg, sizeof(msg), "%s%lu", prefix, (unsigned long)ESP8266_USART_BAUDRATE);
+    esp8266_save_debug(msg);
 }
 
 static void esp8266_clear_rx(void)
@@ -982,67 +983,44 @@ static void init_poll(void)
         {
             esp8266_uart_recover();
             s_retry_count = 0u;
-            s_baud_idx = 0u;
             esp8266_set_phase(INIT_AT_SEND);
         }
         else if (esp8266_phase_timeout(RST_TIMEOUT))
         {
             esp8266_uart_recover();
             s_retry_count = 0u;
-            s_baud_idx = 0u;
             esp8266_set_phase(INIT_AT_SEND);
         }
         break;
 
     case INIT_AT_SEND:
-    {
-        uint32_t target_baud = s_baud_table[s_baud_idx];
-        char baud_msg[32];
+        if (huart_esp8266.Init.BaudRate != ESP8266_USART_BAUDRATE)
+            esp8266_uart_set_baud(ESP8266_USART_BAUDRATE);
 
-        if (huart_esp8266.Init.BaudRate != target_baud)
-            esp8266_uart_set_baud(target_baud);
-
-        snprintf(baud_msg, sizeof(baud_msg), "AT@%lu..", (unsigned long)target_baud);
-        esp8266_save_debug(baud_msg);
+        esp8266_save_baud_debug("AT@");
         if (esp8266_send_cmd_now("AT"))
         {
             esp8266_set_phase(INIT_AT_WAIT);
         }
         break;
-    }
 
     case INIT_AT_WAIT:
         if (esp8266_check_resp("OK"))
         {
-            uint32_t cur_baud = s_baud_table[s_baud_idx];
             s_retry_count = 0u;
-
-            if (cur_baud != ESP8266_USART_BAUDRATE)
-            {
-                esp8266_save_debug("set target baud...");
-                esp8266_set_phase(INIT_UART_DEF_SEND);
-            }
-            else
-            {
-                esp8266_save_debug("AT OK");
-                esp8266_set_phase(INIT_ATE0_SEND);
-            }
+            esp8266_save_baud_debug("UART=");
+            esp8266_set_phase(INIT_UART_DEF_SEND);
         }
         else if (esp8266_phase_timeout(AT_TEST_TIMEOUT))
         {
-            if (++s_retry_count < AT_PER_BAUD_RETRIES)
+            if (++s_retry_count < AT_RETRIES)
             {
                 esp8266_uart_recover();
                 esp8266_set_phase(INIT_AT_SEND);
             }
-            else if (++s_baud_idx < BAUD_TABLE_SIZE)
-            {
-                s_retry_count = 0u;
-                esp8266_set_phase(INIT_AT_SEND);
-            }
             else
             {
-                esp8266_save_debug("AT:all baud fail");
+                esp8266_save_debug("AT:baud fail");
                 s_status = ESP8266_STATUS_ERROR;
                 esp8266_set_phase(INIT_FAIL);
             }
@@ -1064,27 +1042,25 @@ static void init_poll(void)
         break;
 
     case INIT_UART_DEF_SEND:
-        if (esp8266_send_cmd_now("AT+UART_DEF=115200,8,1,0,0"))
+        snprintf(cmd_buf, sizeof(cmd_buf), "AT+UART_DEF=%lu,8,1,0,0",
+                 (unsigned long)ESP8266_USART_BAUDRATE);
+        if (esp8266_send_cmd_now(cmd_buf))
         {
             esp8266_set_phase(INIT_UART_DEF_WAIT);
         }
         break;
 
     case INIT_UART_DEF_WAIT:
-        if (esp8266_check_resp("OK") || esp8266_phase_timeout(AT_CMD_TIMEOUT))
+        if (esp8266_check_resp("OK"))
         {
-            esp8266_set_phase(INIT_UART_SWITCH_WAIT);
-        }
-        break;
-
-    case INIT_UART_SWITCH_WAIT:
-        if (esp8266_phase_timeout(UART_SWITCH_DELAY_MS))
-        {
-            esp8266_uart_set_baud(ESP8266_USART_BAUDRATE);
-            s_baud_idx = 0u;
-            esp8266_save_debug("baud->115200");
             s_retry_count = 0u;
             esp8266_set_phase(INIT_ATE0_SEND);
+        }
+        else if (esp8266_phase_timeout(AT_CMD_TIMEOUT))
+        {
+            esp8266_save_debug("UART_DEF fail");
+            s_status = ESP8266_STATUS_ERROR;
+            esp8266_set_phase(INIT_FAIL);
         }
         break;
 
@@ -1259,7 +1235,6 @@ void esp8266_init(void)
     s_status = ESP8266_STATUS_INITIALIZING;
     s_retry_count = 0u;
     s_use_cwjap_def = 0u;
-    s_baud_idx = 0u;
     s_tcp_server_port = 0u;
     s_tcp_parse_offset = 0u;
 
