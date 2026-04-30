@@ -150,6 +150,10 @@ class DeviceManager:
         with self._lock:
             return len(self._clients) > 0
 
+    def is_running(self) -> bool:
+        """TCP 设备服务器是否正在运行。"""
+        return self._running and self._server_socket is not None
+
     def client_count(self) -> int:
         """已连接的设备数量"""
         with self._lock:
@@ -584,24 +588,24 @@ class DeviceManager:
                         pass
                     logger.info(f"踢掉旧连接: {key} (同 IP 设备重连)")
 
+    def _register_client(self, key: str, device: DeviceConnection) -> None:
+        """收到首个数据帧后登记为有效设备连接。"""
+        self._kick_same_ip(device.addr[0])
+        with self._lock:
+            self._clients[key] = device
+        logger.info(f"设备已连接: {key}")
+
     def _accept_loop(self):
         """接受新连接的主循环"""
         while self._running:
             try:
                 conn, addr = self._server_socket.accept()
-                ip = addr[0]
                 key = f"{addr[0]}:{addr[1]}"
 
                 # 启用 TCP keepalive
                 self._enable_tcp_keepalive(conn)
 
-                # 同一 IP 新连接到来：先踢掉旧连接
-                self._kick_same_ip(ip)
-
                 device = DeviceConnection(conn, addr)
-                with self._lock:
-                    self._clients[key] = device
-                logger.info(f"设备已连接: {key}")
 
                 device.sender_thread = threading.Thread(
                     target=self._send_loop, args=(key, device), daemon=True
@@ -622,6 +626,7 @@ class DeviceManager:
 
     def _handle_client(self, key: str, device: DeviceConnection):
         """处理单个设备连接的数据接收。"""
+        registered = False
         try:
             device.conn.settimeout(RECV_TIMEOUT)
             while self._running:
@@ -630,6 +635,9 @@ class DeviceManager:
                     if not data:
                         break
                     device.last_active = time.time()
+                    if not registered:
+                        self._register_client(key, device)
+                        registered = True
                     self._parse_stream(device, data)
 
                 except socket.timeout:
@@ -648,10 +656,11 @@ class DeviceManager:
         except Exception as e:
             logger.error(f"设备 {key} 处理异常: {e}")
         finally:
-            with self._lock:
-                # 只移除属于自己的连接（可能已被新连接替换过）
-                if self._clients.get(key) is device:
-                    self._clients.pop(key, None)
+            if registered:
+                with self._lock:
+                    # 只移除属于自己的连接（可能已被新连接替换过）
+                    if self._clients.get(key) is device:
+                        self._clients.pop(key, None)
             try:
                 device.send_queue.put_nowait(None)
             except Exception:
@@ -661,7 +670,8 @@ class DeviceManager:
             except Exception:
                 pass
             self._finish_audio_capture(device)
-            logger.info(f"设备已断开: {key}")
+            if registered:
+                logger.info(f"设备已断开: {key}")
 
     def _send_loop(self, key: str, device: DeviceConnection):
         """处理单个设备连接的数据发送，避免业务线程阻塞在 socket.sendall。"""

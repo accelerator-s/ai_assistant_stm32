@@ -110,7 +110,7 @@ class Config:
                         "voice": "alloy"
                     },
                     "advanced": {
-                        "service_port": 5000,
+                        "service_port": 8266,
                         "log_level": "INFO",
                         "session_expiry_hours": 24,
                         "max_history_per_session": 50,
