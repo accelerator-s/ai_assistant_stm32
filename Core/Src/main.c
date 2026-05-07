@@ -70,9 +70,10 @@ static uint32_t rec_start_tick = 0;
 static uint8_t k1_no_tcp_hint_latched = 0;
 
 #define AUDIO_UPLOAD_BUFFER_SAMPLES 16000u
-#define AUDIO_UPLOAD_CHUNK_SAMPLES 512u
-#define AUDIO_UPLOAD_TRIGGER_SAMPLES 64u
+#define AUDIO_UPLOAD_CHUNK_SAMPLES 1024u
+#define AUDIO_UPLOAD_TRIGGER_SAMPLES AUDIO_UPLOAD_CHUNK_SAMPLES
 #define AUDIO_UPLOAD_DOWNSAMPLE 4u
+#define AUDIO_UPLOAD_GAIN_Q8 512
 
 #define WIFI_COLOR_CONNECTED COLOR_ACCENT_GREEN
 #define WIFI_COLOR_DISCONNECTED COLOR_ICON_MIC
@@ -81,6 +82,9 @@ static int16_t audio_upload_buffer[AUDIO_UPLOAD_BUFFER_SAMPLES];
 static volatile uint16_t audio_upload_write_pos = 0;
 static volatile uint16_t audio_upload_read_pos = 0;
 static volatile uint8_t audio_upload_overflow = 0;
+static volatile uint32_t audio_upload_dropped_samples = 0;
+static int32_t audio_upload_downsample_acc = 0;
+static uint16_t audio_upload_downsample_count = 0;
 static volatile uint8_t rec_end_pending = 0;
 static volatile uint8_t mic_rec_done_pending = 0;
 
@@ -143,6 +147,9 @@ static void audio_buffer_reset(void)
     audio_upload_read_pos = 0;
     audio_upload_write_pos = 0;
     audio_upload_overflow = 0;
+    audio_upload_dropped_samples = 0;
+    audio_upload_downsample_acc = 0;
+    audio_upload_downsample_count = 0;
     __enable_irq();
 }
 
@@ -154,6 +161,18 @@ static uint16_t audio_buffer_available(void)
     write_pos = audio_upload_write_pos;
     __enable_irq();
     return ring_distance(read_pos, write_pos, AUDIO_UPLOAD_BUFFER_SAMPLES);
+}
+
+static int16_t audio_upload_apply_gain(int16_t sample)
+{
+    int32_t amplified = ((int32_t)sample * (int32_t)AUDIO_UPLOAD_GAIN_Q8) >> 8;
+
+    if (amplified > 32767)
+        return 32767;
+    if (amplified < -32768)
+        return -32768;
+
+    return (int16_t)amplified;
 }
 
 static void mic_probe_reset_stats(void)
@@ -442,20 +461,26 @@ static void on_audio_data(const int16_t *buf, uint16_t len)
 
     /* 抽取降采样前先做简单均值滤波（抗混叠）
      * 对每 AUDIO_UPLOAD_DOWNSAMPLE 个样本取平均值，而不是直接丢弃 */
-    for (i = 0; (i + AUDIO_UPLOAD_DOWNSAMPLE - 1u) < len; i += AUDIO_UPLOAD_DOWNSAMPLE)
+    for (i = 0; i < len; i++)
     {
-        int32_t acc = 0;
-        uint16_t j;
-        for (j = 0; j < AUDIO_UPLOAD_DOWNSAMPLE; j++)
-        {
-            acc += (int32_t)buf[i + j];
-        }
-        int16_t sample = (int16_t)(acc / (int32_t)AUDIO_UPLOAD_DOWNSAMPLE);
+        int16_t sample;
+        uint16_t next;
 
-        uint16_t next = (uint16_t)((audio_upload_write_pos + 1u) % AUDIO_UPLOAD_BUFFER_SAMPLES);
+        audio_upload_downsample_acc += (int32_t)buf[i];
+        audio_upload_downsample_count++;
+        if (audio_upload_downsample_count < AUDIO_UPLOAD_DOWNSAMPLE)
+            continue;
+
+        sample = (int16_t)(audio_upload_downsample_acc / (int32_t)AUDIO_UPLOAD_DOWNSAMPLE);
+        sample = audio_upload_apply_gain(sample);
+        audio_upload_downsample_acc = 0;
+        audio_upload_downsample_count = 0;
+
+        next = (uint16_t)((audio_upload_write_pos + 1u) % AUDIO_UPLOAD_BUFFER_SAMPLES);
         if (next == audio_upload_read_pos)
         {
             audio_upload_overflow = 1u;
+            audio_upload_dropped_samples++;
             audio_upload_read_pos = (uint16_t)((audio_upload_read_pos + 1u) % AUDIO_UPLOAD_BUFFER_SAMPLES);
         }
         audio_upload_buffer[audio_upload_write_pos] = sample;
@@ -469,6 +494,7 @@ static void audio_upload_poll(void)
 {
     uint16_t available;
     uint16_t read_pos;
+    uint16_t write_pos;
     uint16_t contiguous;
     esp8266_send_result_t send_ret;
     uint8_t force_flush_tail;
@@ -492,11 +518,12 @@ static void audio_upload_poll(void)
 
     __disable_irq();
     read_pos = audio_upload_read_pos;
+    write_pos = audio_upload_write_pos;
     __enable_irq();
 
-    if (audio_upload_write_pos >= read_pos)
+    if (write_pos >= read_pos)
     {
-        contiguous = (uint16_t)(audio_upload_write_pos - read_pos);
+        contiguous = (uint16_t)(write_pos - read_pos);
     }
     else
     {
