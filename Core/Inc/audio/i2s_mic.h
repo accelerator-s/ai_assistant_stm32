@@ -106,4 +106,25 @@ DMA_HandleTypeDef *i2s_mic_get_dma_handle(void);
  */
 uint8_t i2s_mic_probe(void);
 
+/**
+ * Play a short mono test tone on I2S2 for MAX98357A speaker checks.
+ * The driver temporarily switches I2S2 from microphone RX to master TX and
+ * restores the microphone configuration before returning.
+ * @return 1=played successfully, 0=I2S transmit failed
+ */
+uint8_t i2s_mic_play_tone(uint16_t frequency_hz, uint16_t duration_ms);
+
+/**
+ * Play a linear frequency sweep on I2S2 for speaker response checks.
+ * @return 1=played successfully, 0=I2S transmit failed
+ */
+uint8_t i2s_mic_play_sweep(uint16_t start_hz, uint16_t end_hz, uint16_t duration_ms);
+
+/**
+ * Play a sequence of 1 kHz beeps with different PCM amplitudes.
+ * levels_percent values are clamped to 0..100.
+ * @return 1=played successfully, 0=I2S transmit failed
+ */
+uint8_t i2s_mic_play_volume_steps(const uint8_t *levels_percent, uint8_t count);
+
 #endif /* __I2S_MIC_H */

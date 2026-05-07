@@ -15,6 +15,7 @@ import SecurityPanel       from '/static/js/components/SecurityPanel.js';
 import SecuritySettings    from '/static/js/components/SecuritySettings.js';
 import UserSettings        from '/static/js/components/UserSettings.js';
 import MicTest             from '/static/js/components/MicTest.js';
+import SpeakerTest         from '/static/js/components/SpeakerTest.js';
 
 const { createApp, ref, computed, onMounted } = Vue;
 const { ElMessage } = ElementPlus;
@@ -25,6 +26,7 @@ const ICONS = {
   dashboard:   `<svg viewBox="0 0 16 16"><rect x="1" y="1" width="6" height="6" rx="1" fill="currentColor"/><rect x="9" y="1" width="6" height="3" rx="1" fill="currentColor"/><rect x="9" y="6" width="6" height="2" rx="1" fill="currentColor" opacity=".5"/><rect x="1" y="9" width="6" height="2" rx="1" fill="currentColor" opacity=".5"/><rect x="1" y="13" width="6" height="2" rx="1" fill="currentColor" opacity=".3"/><rect x="9" y="10" width="6" height="5" rx="1" fill="currentColor" opacity=".7"/></svg>`,
   device:      `<svg viewBox="0 0 16 16"><rect x="2" y="1" width="12" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M5 11v3h6v-3" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M4 14h8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="8" cy="6" r="1.5" fill="currentColor"/></svg>`,
   mic:         `<svg viewBox="0 0 16 16"><rect x="5.5" y="1" width="5" height="8" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M3 7c0 2.8 2.2 5 5 5s5-2.2 5-5" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8 12v3M6 15h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`,
+  speaker:     `<svg viewBox="0 0 16 16"><path d="M2 6h3l4-3v10L5 10H2z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M11 6c.7.6 1 1.2 1 2s-.3 1.4-1 2M13 4c1.2 1.1 2 2.4 2 4s-.8 2.9-2 4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`,
   openai:      `<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M5 8h6M8 5v6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`,
   message:     `<svg viewBox="0 0 16 16"><path d="M2 3h12a1 1 0 011 1v7a1 1 0 01-1 1H5l-3 3V4a1 1 0 011-1z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M5 7h6M5 9.5h4" stroke="currentColor" stroke-width="1" stroke-linecap="round"/></svg>`,
   advanced:    `<svg viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M5 7h6M5 9.5h4" stroke="currentColor" stroke-width="1" stroke-linecap="round"/></svg>`,
@@ -38,6 +40,7 @@ const ICONS = {
 const NAV_ITEMS = [
   { key: 'status',    label: '概览',       icon: 'dashboard', section: '监控' },
   { key: 'mictest',   label: '麦克风',     icon: 'mic',       section: '配置' },
+  { key: 'speaker',   label: '音响',       icon: 'speaker',   section: '配置' },
   { key: 'user',      label: '用户设置',   icon: 'device',    section: '配置' },
   { key: 'device',    label: '设备通信',   icon: 'device',    section: '配置' },
   { key: 'speech',    label: '语音识别',   icon: 'mic',       section: '配置' },
@@ -209,6 +212,7 @@ const App = {
     const tabMap = {
       status:   StatusPanel,
       mictest:  MicTest,
+      speaker:  SpeakerTest,
       user:     UserSettings,
       device:   DeviceConfig,
       speech:   SpeechConfig,
@@ -295,4 +299,5 @@ app.component('SecurityPanel', SecurityPanel);
 app.component('SecuritySettings', SecuritySettings);
 app.component('UserSettings', UserSettings);
 app.component('MicTest', MicTest);
+app.component('SpeakerTest', SpeakerTest);
 app.mount('#app');

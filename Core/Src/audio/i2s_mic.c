@@ -95,6 +95,44 @@ static void i2s_gpio_init(void)
     HAL_GPIO_Init(GPIOB, &gpio);
 }
 
+static void i2s_speaker_gpio_init(void)
+{
+    GPIO_InitTypeDef gpio = {0};
+
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+
+    gpio.Pin = I2S_SCK_PIN | I2S_WS_PIN | I2S_SD_PIN;
+    gpio.Mode = GPIO_MODE_AF_PP;
+    gpio.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(GPIOB, &gpio);
+}
+
+static HAL_StatusTypeDef i2s_config_master_rx(void)
+{
+    hi2s2.Instance = SPI2;
+    hi2s2.Init.Mode = I2S_MODE_MASTER_RX;
+    hi2s2.Init.Standard = I2S_STANDARD_PHILIPS;
+    hi2s2.Init.DataFormat = I2S_DATAFORMAT_16B_EXTENDED;
+    hi2s2.Init.MCLKOutput = I2S_MCLKOUTPUT_DISABLE;
+    hi2s2.Init.AudioFreq = I2S_AUDIOFREQ_32K;
+    hi2s2.Init.CPOL = I2S_CPOL_LOW;
+
+    return HAL_I2S_Init(&hi2s2);
+}
+
+static HAL_StatusTypeDef i2s_config_master_tx(uint32_t audio_freq)
+{
+    hi2s2.Instance = SPI2;
+    hi2s2.Init.Mode = I2S_MODE_MASTER_TX;
+    hi2s2.Init.Standard = I2S_STANDARD_PHILIPS;
+    hi2s2.Init.DataFormat = I2S_DATAFORMAT_16B;
+    hi2s2.Init.MCLKOutput = I2S_MCLKOUTPUT_DISABLE;
+    hi2s2.Init.AudioFreq = audio_freq;
+    hi2s2.Init.CPOL = I2S_CPOL_LOW;
+
+    return HAL_I2S_Init(&hi2s2);
+}
+
 /**
  * DMA1 Channel4 初始化 — SPI2_RX 专用通道
  */
@@ -426,4 +464,353 @@ uint8_t i2s_mic_probe(void)
     }
 
     return 0;
+}
+
+uint8_t i2s_mic_play_tone(uint16_t frequency_hz, uint16_t duration_ms)
+{
+    enum
+    {
+        TONE_SAMPLE_RATE = 16000u,
+        TONE_FRAMES_PER_CHUNK = 64u,
+        TONE_AMPLITUDE = 9000u
+    };
+
+    uint16_t tx_buf[TONE_FRAMES_PER_CHUNK * 2u];
+    uint32_t total_frames;
+    uint32_t frames_sent = 0u;
+    uint32_t half_period_frames;
+    uint32_t wave_pos = 0u;
+    uint8_t ok = 1u;
+
+    if (frequency_hz < 20u)
+        frequency_hz = 20u;
+    if (frequency_hz > 4000u)
+        frequency_hz = 4000u;
+    if (duration_ms < 10u)
+        duration_ms = 10u;
+    if (duration_ms > 5000u)
+        duration_ms = 5000u;
+
+    if (is_recording)
+    {
+        HAL_I2S_DMAStop(&hi2s2);
+        is_recording = 0u;
+    }
+
+    total_frames = ((uint32_t)duration_ms * TONE_SAMPLE_RATE) / 1000u;
+    half_period_frames = TONE_SAMPLE_RATE / ((uint32_t)frequency_hz * 2u);
+    if (half_period_frames == 0u)
+        half_period_frames = 1u;
+
+    i2s_speaker_gpio_init();
+    (void)HAL_I2S_DeInit(&hi2s2);
+
+    if (i2s_config_master_tx(I2S_AUDIOFREQ_16K) != HAL_OK)
+    {
+        ok = 0u;
+    }
+
+    while (ok && frames_sent < total_frames)
+    {
+        uint16_t frames_this_chunk = TONE_FRAMES_PER_CHUNK;
+        uint16_t i;
+
+        if ((total_frames - frames_sent) < frames_this_chunk)
+        {
+            frames_this_chunk = (uint16_t)(total_frames - frames_sent);
+        }
+
+        for (i = 0u; i < frames_this_chunk; i++)
+        {
+            int16_t sample = (wave_pos < half_period_frames) ?
+                             (int16_t)TONE_AMPLITUDE : -(int16_t)TONE_AMPLITUDE;
+            tx_buf[i * 2u] = (uint16_t)sample;
+            tx_buf[i * 2u + 1u] = (uint16_t)sample;
+
+            wave_pos++;
+            if (wave_pos >= (half_period_frames * 2u))
+            {
+                wave_pos = 0u;
+            }
+        }
+
+        if (HAL_I2S_Transmit(&hi2s2, tx_buf, (uint16_t)(frames_this_chunk * 2u), 200u) != HAL_OK)
+        {
+            ok = 0u;
+            break;
+        }
+
+        frames_sent += frames_this_chunk;
+    }
+
+    (void)HAL_I2S_DeInit(&hi2s2);
+    i2s_gpio_init();
+    if (i2s_config_master_rx() == HAL_OK)
+    {
+        i2s_dma_init();
+    }
+    else
+    {
+        ok = 0u;
+    }
+
+    memset(i2s_dma_buf, 0, sizeof(i2s_dma_buf));
+    dbg_callback_count = 0u;
+    startup_discard_counter = 0u;
+    is_recording = 0u;
+
+    if (I2S_MIC_SLOT_SEL == I2S_MIC_SLOT_AUTO)
+    {
+        slot_detected = 0u;
+        slot_offset_runtime = 0u;
+        detect_callback_count = 0u;
+        detect_energy_pos0 = 0u;
+        detect_energy_pos1 = 0u;
+    }
+
+    return ok;
+}
+
+uint8_t i2s_mic_play_sweep(uint16_t start_hz, uint16_t end_hz, uint16_t duration_ms)
+{
+    enum
+    {
+        SWEEP_SAMPLE_RATE = 16000u,
+        SWEEP_FRAMES_PER_CHUNK = 64u,
+        SWEEP_AMPLITUDE = 8000u
+    };
+
+    uint16_t tx_buf[SWEEP_FRAMES_PER_CHUNK * 2u];
+    uint32_t total_frames;
+    uint32_t frames_sent = 0u;
+    uint32_t phase_acc = 0u;
+    uint8_t ok = 1u;
+
+    if (start_hz < 20u)
+        start_hz = 20u;
+    if (end_hz < 20u)
+        end_hz = 20u;
+    if (start_hz > 4000u)
+        start_hz = 4000u;
+    if (end_hz > 4000u)
+        end_hz = 4000u;
+    if (duration_ms < 50u)
+        duration_ms = 50u;
+    if (duration_ms > 8000u)
+        duration_ms = 8000u;
+
+    if (is_recording)
+    {
+        HAL_I2S_DMAStop(&hi2s2);
+        is_recording = 0u;
+    }
+
+    total_frames = ((uint32_t)duration_ms * SWEEP_SAMPLE_RATE) / 1000u;
+
+    i2s_speaker_gpio_init();
+    (void)HAL_I2S_DeInit(&hi2s2);
+
+    if (i2s_config_master_tx(I2S_AUDIOFREQ_16K) != HAL_OK)
+    {
+        ok = 0u;
+    }
+
+    while (ok && frames_sent < total_frames)
+    {
+        uint16_t frames_this_chunk = SWEEP_FRAMES_PER_CHUNK;
+        uint16_t i;
+
+        if ((total_frames - frames_sent) < frames_this_chunk)
+        {
+            frames_this_chunk = (uint16_t)(total_frames - frames_sent);
+        }
+
+        for (i = 0u; i < frames_this_chunk; i++)
+        {
+            uint32_t frame_index = frames_sent + i;
+            int32_t delta_hz = (int32_t)end_hz - (int32_t)start_hz;
+            uint32_t freq_hz = (uint32_t)((int32_t)start_hz +
+                                ((delta_hz * (int32_t)frame_index) / (int32_t)total_frames));
+            int16_t sample;
+
+            if (freq_hz < 20u)
+                freq_hz = 20u;
+
+            phase_acc += freq_hz;
+            while (phase_acc >= SWEEP_SAMPLE_RATE)
+            {
+                phase_acc -= SWEEP_SAMPLE_RATE;
+            }
+
+            sample = (phase_acc < (SWEEP_SAMPLE_RATE / 2u)) ?
+                     (int16_t)SWEEP_AMPLITUDE : -(int16_t)SWEEP_AMPLITUDE;
+            tx_buf[i * 2u] = (uint16_t)sample;
+            tx_buf[i * 2u + 1u] = (uint16_t)sample;
+        }
+
+        if (HAL_I2S_Transmit(&hi2s2, tx_buf, (uint16_t)(frames_this_chunk * 2u), 200u) != HAL_OK)
+        {
+            ok = 0u;
+            break;
+        }
+
+        frames_sent += frames_this_chunk;
+    }
+
+    (void)HAL_I2S_DeInit(&hi2s2);
+    i2s_gpio_init();
+    if (i2s_config_master_rx() == HAL_OK)
+    {
+        i2s_dma_init();
+    }
+    else
+    {
+        ok = 0u;
+    }
+
+    memset(i2s_dma_buf, 0, sizeof(i2s_dma_buf));
+    dbg_callback_count = 0u;
+    startup_discard_counter = 0u;
+    is_recording = 0u;
+
+    if (I2S_MIC_SLOT_SEL == I2S_MIC_SLOT_AUTO)
+    {
+        slot_detected = 0u;
+        slot_offset_runtime = 0u;
+        detect_callback_count = 0u;
+        detect_energy_pos0 = 0u;
+        detect_energy_pos1 = 0u;
+    }
+
+    return ok;
+}
+
+uint8_t i2s_mic_play_volume_steps(const uint8_t *levels_percent, uint8_t count)
+{
+    enum
+    {
+        VOL_SAMPLE_RATE = 16000u,
+        VOL_FRAMES_PER_CHUNK = 64u,
+        VOL_MAX_AMPLITUDE = 10000u,
+        VOL_TONE_HZ = 1000u,
+        VOL_BEEP_MS = 350u,
+        VOL_GAP_MS = 120u
+    };
+
+    uint16_t tx_buf[VOL_FRAMES_PER_CHUNK * 2u];
+    uint8_t ok = 1u;
+    uint8_t step;
+
+    if (!levels_percent || count == 0u)
+        return 0u;
+    if (count > 8u)
+        count = 8u;
+
+    if (is_recording)
+    {
+        HAL_I2S_DMAStop(&hi2s2);
+        is_recording = 0u;
+    }
+
+    i2s_speaker_gpio_init();
+    (void)HAL_I2S_DeInit(&hi2s2);
+
+    if (i2s_config_master_tx(I2S_AUDIOFREQ_16K) != HAL_OK)
+    {
+        ok = 0u;
+    }
+
+    for (step = 0u; ok && step < count; step++)
+    {
+        uint8_t percent = levels_percent[step];
+        uint32_t beep_frames = ((uint32_t)VOL_BEEP_MS * VOL_SAMPLE_RATE) / 1000u;
+        uint32_t gap_frames = ((uint32_t)VOL_GAP_MS * VOL_SAMPLE_RATE) / 1000u;
+        uint32_t frames_sent = 0u;
+        uint32_t half_period_frames = VOL_SAMPLE_RATE / ((uint32_t)VOL_TONE_HZ * 2u);
+        uint32_t wave_pos = 0u;
+        uint16_t amplitude;
+
+        if (percent > 100u)
+            percent = 100u;
+        amplitude = (uint16_t)(((uint32_t)VOL_MAX_AMPLITUDE * percent) / 100u);
+
+        while (ok && frames_sent < beep_frames)
+        {
+            uint16_t frames_this_chunk = VOL_FRAMES_PER_CHUNK;
+            uint16_t i;
+
+            if ((beep_frames - frames_sent) < frames_this_chunk)
+            {
+                frames_this_chunk = (uint16_t)(beep_frames - frames_sent);
+            }
+
+            for (i = 0u; i < frames_this_chunk; i++)
+            {
+                int16_t sample = (wave_pos < half_period_frames) ?
+                                 (int16_t)amplitude : -(int16_t)amplitude;
+                tx_buf[i * 2u] = (uint16_t)sample;
+                tx_buf[i * 2u + 1u] = (uint16_t)sample;
+
+                wave_pos++;
+                if (wave_pos >= (half_period_frames * 2u))
+                {
+                    wave_pos = 0u;
+                }
+            }
+
+            if (HAL_I2S_Transmit(&hi2s2, tx_buf, (uint16_t)(frames_this_chunk * 2u), 200u) != HAL_OK)
+            {
+                ok = 0u;
+                break;
+            }
+
+            frames_sent += frames_this_chunk;
+        }
+
+        frames_sent = 0u;
+        memset(tx_buf, 0, sizeof(tx_buf));
+        while (ok && frames_sent < gap_frames)
+        {
+            uint16_t frames_this_chunk = VOL_FRAMES_PER_CHUNK;
+            if ((gap_frames - frames_sent) < frames_this_chunk)
+            {
+                frames_this_chunk = (uint16_t)(gap_frames - frames_sent);
+            }
+
+            if (HAL_I2S_Transmit(&hi2s2, tx_buf, (uint16_t)(frames_this_chunk * 2u), 200u) != HAL_OK)
+            {
+                ok = 0u;
+                break;
+            }
+
+            frames_sent += frames_this_chunk;
+        }
+    }
+
+    (void)HAL_I2S_DeInit(&hi2s2);
+    i2s_gpio_init();
+    if (i2s_config_master_rx() == HAL_OK)
+    {
+        i2s_dma_init();
+    }
+    else
+    {
+        ok = 0u;
+    }
+
+    memset(i2s_dma_buf, 0, sizeof(i2s_dma_buf));
+    dbg_callback_count = 0u;
+    startup_discard_counter = 0u;
+    is_recording = 0u;
+
+    if (I2S_MIC_SLOT_SEL == I2S_MIC_SLOT_AUTO)
+    {
+        slot_detected = 0u;
+        slot_offset_runtime = 0u;
+        detect_callback_count = 0u;
+        detect_energy_pos0 = 0u;
+        detect_energy_pos1 = 0u;
+    }
+
+    return ok;
 }

@@ -8,10 +8,10 @@
 /* ===================== WiFi 热点配置 ===================== */
 
 /* 目标 WiFi 的 SSID（热点名称） */
-#define WIFI_SSID "fatalnova"
+#define WIFI_SSID "12.22Hz"
 
 /* 目标 WiFi 的密码 */
-#define WIFI_PASSWORD "12345678z"
+#define WIFI_PASSWORD "11111111"
 
 /* ===================== 服务器地址配置 ===================== */
 
