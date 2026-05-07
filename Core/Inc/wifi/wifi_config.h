@@ -16,7 +16,7 @@
 /* ===================== 服务器地址配置 ===================== */
 
 /* 云端服务器 IP 地址 */
-#define SERVER_IP "192.168.43.202"
+#define SERVER_IP "192.168.43.56"
 
 /* 云端服务器端口号 */
 #define SERVER_PORT 8266
@@ -25,7 +25,8 @@
 
 /* ESP8266 使用的串口: USART3 (PB10=TX, PB11=RX)，焊接在开发板上 */
 #define ESP8266_USART USART3
-#define ESP8266_USART_BAUDRATE 115200
+#define ESP8266_USART_BAUDRATE 460800
+#define ESP8266_USART_FALLBACK_BAUDRATE 115200
 
 #define ESP8266_USART_CLK_ENABLE() __HAL_RCC_USART3_CLK_ENABLE()
 #define ESP8266_USART_IRQn USART3_IRQn
