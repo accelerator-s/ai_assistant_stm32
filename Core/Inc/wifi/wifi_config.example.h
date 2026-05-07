@@ -8,15 +8,15 @@
 /* ===================== WiFi 热点配置 ===================== */
 
 /* 目标 WiFi 的 SSID（热点名称） */
-#define WIFI_SSID "12.22Hz"
+#define WIFI_SSID "OPPO Find X6 Pro"
 
 /* 目标 WiFi 的密码 */
-#define WIFI_PASSWORD "11111111"
+#define WIFI_PASSWORD "87654321"
 
 /* ===================== 服务器地址配置 ===================== */
 
-/* 云端服务器 IP 地址 */
-#define SERVER_IP "192.168.43.56"
+/* 云端服务器地址 */
+#define SERVER_IP "10.171.204.245"
 
 /* 云端服务器端口号 */
 #define SERVER_PORT 8266

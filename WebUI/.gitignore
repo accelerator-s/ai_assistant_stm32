@@ -4,13 +4,13 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Database
+# Data
 data/*.db
 data/*.db-shm
 data/*.db-wal
 data/audio/
 
-# Local config (contains secrets)
+# Local config
 config/default_config.json
 
 # IDE
