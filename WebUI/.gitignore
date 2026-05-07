@@ -8,6 +8,7 @@ __pycache__/
 data/*.db
 data/*.db-shm
 data/*.db-wal
+data/audio/
 
 # Local config (contains secrets)
 config/default_config.json
