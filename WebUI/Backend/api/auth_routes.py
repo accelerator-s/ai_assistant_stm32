@@ -68,11 +68,11 @@ def check_auth():
 
     token = request.cookies.get("session_token")
     if not token:
-        return jsonify({"authenticated": False}), 401
+        return jsonify({"authenticated": False})
 
     payload = auth_manager.validate_token(token)
     if payload is None:
-        return jsonify({"authenticated": False}), 401
+        return jsonify({"authenticated": False})
 
     return jsonify({"authenticated": True})
 

@@ -1332,6 +1332,8 @@ int esp8266_tcp_read_line(char *out, uint16_t out_size)
     char *base;
     char *ipd;
     char *comma;
+    char *len_start;
+    char *next_comma;
     char *colon;
     char *payload;
     char *line_end;
@@ -1371,7 +1373,14 @@ int esp8266_tcp_read_line(char *out, uint16_t out_size)
     if (!comma || !colon || colon <= comma)
         return 0;
 
-    payload_len = (uint16_t)atoi(comma + 1);
+    len_start = comma + 1;
+    next_comma = strchr(len_start, ',');
+    if (next_comma && next_comma < colon)
+    {
+        len_start = next_comma + 1;
+    }
+
+    payload_len = (uint16_t)atoi(len_start);
     payload = colon + 1;
     avail = (uint16_t)(resp_buf + buf_len - payload);
     if (avail < payload_len)
