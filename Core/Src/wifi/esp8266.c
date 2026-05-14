@@ -45,6 +45,9 @@ static uint16_t s_uart_tx_len = 0u;
 /* 线性应答缓冲区，用于解析 AT 响应 */
 static char resp_buf[ESP8266_RX_BUF_SIZE];
 static uint16_t s_tcp_parse_offset;
+#define ESP8266_TCP_LINE_BUF_SIZE 1536u
+static char s_tcp_line_buf[ESP8266_TCP_LINE_BUF_SIZE];
+static uint16_t s_tcp_line_len;
 
 /* 模块对外状态 */
 static esp8266_status_t s_status = ESP8266_STATUS_IDLE;
@@ -207,6 +210,89 @@ static void esp8266_clear_rx(void)
     rx_write_idx = 0;
     memset(rx_ring_buf, 0, sizeof(rx_ring_buf));
     s_tcp_parse_offset = 0;
+    __enable_irq();
+}
+
+static void esp8266_clear_tcp_line_buf(void)
+{
+    s_tcp_line_len = 0u;
+    memset(s_tcp_line_buf, 0, sizeof(s_tcp_line_buf));
+}
+
+static int esp8266_pop_tcp_line(char *out, uint16_t out_size)
+{
+    char *line_end;
+    uint16_t line_len;
+    uint16_t consume_len;
+    uint16_t remain;
+
+    if (!out || out_size < 2u || s_tcp_line_len == 0u)
+        return 0;
+
+    line_end = (char *)memchr(s_tcp_line_buf, '\n', s_tcp_line_len);
+    if (!line_end)
+        return 0;
+
+    line_len = (uint16_t)(line_end - s_tcp_line_buf);
+    consume_len = (uint16_t)(line_len + 1u);
+    if (line_len > 0u && s_tcp_line_buf[line_len - 1u] == '\r')
+        line_len--;
+
+    if (line_len >= out_size)
+        line_len = (uint16_t)(out_size - 1u);
+
+    if (line_len > 0u)
+        memcpy(out, s_tcp_line_buf, line_len);
+    out[line_len] = '\0';
+
+    remain = (uint16_t)(s_tcp_line_len - consume_len);
+    if (remain > 0u)
+        memmove(s_tcp_line_buf, &s_tcp_line_buf[consume_len], remain);
+    memset(&s_tcp_line_buf[remain], 0, (size_t)(sizeof(s_tcp_line_buf) - remain));
+    s_tcp_line_len = remain;
+
+    return (line_len > 0u) ? 1 : esp8266_pop_tcp_line(out, out_size);
+}
+
+static void esp8266_append_tcp_payload(const char *payload, uint16_t payload_len)
+{
+    uint16_t copy_len;
+
+    if (!payload || payload_len == 0u)
+        return;
+
+    if ((uint32_t)s_tcp_line_len + payload_len >= sizeof(s_tcp_line_buf))
+    {
+        esp8266_clear_tcp_line_buf();
+    }
+
+    copy_len = payload_len;
+    if ((uint32_t)s_tcp_line_len + copy_len >= sizeof(s_tcp_line_buf))
+        copy_len = (uint16_t)(sizeof(s_tcp_line_buf) - s_tcp_line_len - 1u);
+
+    if (copy_len > 0u)
+    {
+        memcpy(&s_tcp_line_buf[s_tcp_line_len], payload, copy_len);
+        s_tcp_line_len = (uint16_t)(s_tcp_line_len + copy_len);
+    }
+}
+
+static void esp8266_consume_rx(uint16_t count)
+{
+    __disable_irq();
+    if (count >= rx_write_idx)
+    {
+        rx_write_idx = 0u;
+        memset(rx_ring_buf, 0, sizeof(rx_ring_buf));
+    }
+    else if (count > 0u)
+    {
+        uint16_t remain = (uint16_t)(rx_write_idx - count);
+        memmove(rx_ring_buf, &rx_ring_buf[count], remain);
+        memset(&rx_ring_buf[remain], 0, (size_t)(sizeof(rx_ring_buf) - remain));
+        rx_write_idx = remain;
+    }
+    s_tcp_parse_offset = 0u;
     __enable_irq();
 }
 
@@ -1225,6 +1311,7 @@ void esp8266_init(void)
     memset(s_debug_msg, 0, sizeof(s_debug_msg));
     memset(s_tcp_server_ip, 0, sizeof(s_tcp_server_ip));
     memset(s_uart_tx_buf, 0, sizeof(s_uart_tx_buf));
+    esp8266_clear_tcp_line_buf();
 
     esp8266_gpio_init();
     esp8266_uart_init();
@@ -1336,16 +1423,18 @@ int esp8266_tcp_read_line(char *out, uint16_t out_size)
     char *next_comma;
     char *colon;
     char *payload;
-    char *line_end;
     uint16_t buf_len;
     uint16_t payload_len;
     uint16_t avail;
-    uint16_t line_len;
+    uint16_t consume_len;
 
     if (!out || out_size < 2u)
         return 0;
 
     out[0] = '\0';
+
+    if (esp8266_pop_tcp_line(out, out_size))
+        return 1;
 
     esp8266_snapshot_resp();
     buf_len = (uint16_t)strlen(resp_buf);
@@ -1386,31 +1475,11 @@ int esp8266_tcp_read_line(char *out, uint16_t out_size)
     if (avail < payload_len)
         return 0;
 
-    line_end = (char *)memchr(payload, '\n', payload_len);
-    if (!line_end)
-    {
-        s_tcp_parse_offset = (uint16_t)((payload - resp_buf) + payload_len);
-        return 0;
-    }
+    esp8266_append_tcp_payload(payload, payload_len);
 
-    line_len = (uint16_t)(line_end - payload);
-    if (line_len > 0u && payload[line_len - 1u] == '\r')
-        line_len--;
-
-    if (line_len == 0u)
-    {
-        s_tcp_parse_offset = (uint16_t)((payload - resp_buf) + payload_len);
-        return 0;
-    }
-
-    if (line_len >= out_size)
-        line_len = (uint16_t)(out_size - 1u);
-
-    memcpy(out, payload, line_len);
-    out[line_len] = '\0';
-
-    s_tcp_parse_offset = (uint16_t)((payload - resp_buf) + payload_len);
-    return 1;
+    consume_len = (uint16_t)((payload - resp_buf) + payload_len);
+    esp8266_consume_rx(consume_len);
+    return esp8266_pop_tcp_line(out, out_size);
 }
 
 /* ==================== 中断服务 ==================== */

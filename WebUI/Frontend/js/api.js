@@ -105,6 +105,15 @@ const api = {
   runSpeakerTestCase(caseId) {
     return http.post(`/test/speaker/run/${caseId}`).then((r) => r.data);
   },
+  playLocalSpeakerAudio(file) {
+    const form = new FormData();
+    form.append("file", file);
+    return axios
+      .post("/api/test/speaker/play-local", form, {
+        timeout: 60000,
+      })
+      .then((r) => r.data);
+  },
   getSpeakerTestJob(jobId) {
     return http.get(`/test/speaker/jobs/${jobId}`).then((r) => r.data);
   },

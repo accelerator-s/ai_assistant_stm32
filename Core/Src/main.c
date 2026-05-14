@@ -110,6 +110,25 @@ static uint8_t speaker_test_ok_pending = 0u;
 static uint8_t speaker_tone_done_pending = 0u;
 static uint8_t speaker_sweep_done_pending = 0u;
 static uint8_t speaker_volume_done_pending = 0u;
+static uint8_t speaker_audio_done_pending = 0u;
+static uint8_t speaker_audio_error_pending = 0u;
+static uint8_t speaker_audio_ready_pending = 0u;
+static uint8_t speaker_audio_rx_pending = 0u;
+static uint8_t speaker_audio_chunk_pending = 0u;
+static uint8_t speaker_audio_active = 0u;
+static uint8_t speaker_audio_error = 0u;
+static uint8_t speaker_audio_error_code = 0u;
+static uint32_t speaker_audio_sample_rate = 8000u;
+static uint32_t speaker_audio_expected_samples = 0u;
+static uint32_t speaker_audio_received_samples = 0u;
+static int32_t speaker_adpcm_predictor = 0;
+static int8_t speaker_adpcm_index = 0;
+
+#define SPK_AUDIO_ADPCM_MAX_BYTES 384u
+#define SPK_AUDIO_PCM_MAX_SAMPLES (SPK_AUDIO_ADPCM_MAX_BYTES * 2u)
+
+static uint8_t speaker_adpcm_buf[SPK_AUDIO_ADPCM_MAX_BYTES];
+static int16_t speaker_pcm_buf[SPK_AUDIO_PCM_MAX_SAMPLES];
 
 #define MIC_PROBE_TIMEOUT_MS 250u
 #define MIC_PROBE_MIN_NONZERO_SAMPLES 8u
@@ -121,6 +140,11 @@ static void try_send_speaker_test_ok(void);
 static void try_send_speaker_tone_done(void);
 static void try_send_speaker_sweep_done(void);
 static void try_send_speaker_volume_done(void);
+static void try_send_speaker_audio_done(void);
+static void try_send_speaker_audio_error(void);
+static void try_send_speaker_audio_ready(void);
+static void try_send_speaker_audio_rx(void);
+static void try_send_speaker_audio_chunk(void);
 static void pump_speaker_test_response(uint32_t timeout_ms);
 
 /* ===================== 工具函数 ===================== */
@@ -296,12 +320,269 @@ static void mic_rec_test_poll(void)
     }
 }
 
+/* ===================== 扬声器本地音频播放 ===================== */
+
+static const int8_t spk_adpcm_index_table[16] = {
+    -1, -1, -1, -1, 2, 4, 6, 8,
+    -1, -1, -1, -1, 2, 4, 6, 8
+};
+
+static const int16_t spk_adpcm_step_table[89] = {
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+    19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+    50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
+    130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
+    337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+    876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
+    2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
+    5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
+    15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
+};
+
+static int base64_value(char c)
+{
+    if (c >= 'A' && c <= 'Z')
+        return c - 'A';
+    if (c >= 'a' && c <= 'z')
+        return c - 'a' + 26;
+    if (c >= '0' && c <= '9')
+        return c - '0' + 52;
+    if (c == '+')
+        return 62;
+    if (c == '/')
+        return 63;
+    return -1;
+}
+
+static uint16_t base64_decode_bytes(const char *text, uint8_t *out, uint16_t out_size)
+{
+    uint32_t acc = 0u;
+    uint8_t bits = 0u;
+    uint16_t out_len = 0u;
+
+    while (text && *text)
+    {
+        int v;
+        if (*text == '=')
+            break;
+
+        v = base64_value(*text++);
+        if (v < 0)
+            continue;
+
+        acc = (acc << 6) | (uint32_t)v;
+        bits = (uint8_t)(bits + 6u);
+        if (bits >= 8u)
+        {
+            bits = (uint8_t)(bits - 8u);
+            if (out_len >= out_size)
+                break;
+            out[out_len++] = (uint8_t)((acc >> bits) & 0xFFu);
+        }
+    }
+
+    return out_len;
+}
+
+static int16_t speaker_adpcm_decode_nibble(uint8_t nibble)
+{
+    int32_t step = spk_adpcm_step_table[(uint8_t)speaker_adpcm_index];
+    int32_t diff = step >> 3;
+
+    if (nibble & 0x01u)
+        diff += step >> 2;
+    if (nibble & 0x02u)
+        diff += step >> 1;
+    if (nibble & 0x04u)
+        diff += step;
+
+    if (nibble & 0x08u)
+        speaker_adpcm_predictor -= diff;
+    else
+        speaker_adpcm_predictor += diff;
+
+    if (speaker_adpcm_predictor > 32767)
+        speaker_adpcm_predictor = 32767;
+    else if (speaker_adpcm_predictor < -32768)
+        speaker_adpcm_predictor = -32768;
+
+    speaker_adpcm_index = (int8_t)(speaker_adpcm_index + spk_adpcm_index_table[nibble & 0x0Fu]);
+    if (speaker_adpcm_index < 0)
+        speaker_adpcm_index = 0;
+    else if (speaker_adpcm_index > 88)
+        speaker_adpcm_index = 88;
+
+    return (int16_t)speaker_adpcm_predictor;
+}
+
+static uint16_t speaker_adpcm_decode_block(const uint8_t *adpcm,
+                                           uint16_t adpcm_len,
+                                           int16_t *pcm,
+                                           uint16_t pcm_capacity)
+{
+    uint16_t i;
+    uint16_t out_len = 0u;
+
+    for (i = 0u; i < adpcm_len && (out_len + 1u) < pcm_capacity; i++)
+    {
+        uint8_t b = adpcm[i];
+        pcm[out_len++] = speaker_adpcm_decode_nibble((uint8_t)(b & 0x0Fu));
+        pcm[out_len++] = speaker_adpcm_decode_nibble((uint8_t)(b >> 4));
+    }
+
+    return out_len;
+}
+
+static void speaker_audio_fail(uint8_t code)
+{
+    speaker_audio_error = 1u;
+    speaker_audio_error_pending = 1u;
+    speaker_audio_error_code = code;
+    speaker_audio_ready_pending = 0u;
+    speaker_audio_rx_pending = 0u;
+    speaker_audio_chunk_pending = 0u;
+    if (speaker_audio_active)
+    {
+        i2s_mic_speaker_stream_end();
+        speaker_audio_active = 0u;
+    }
+}
+
+static void speaker_audio_start(const char *line)
+{
+    const char *format;
+    const char *rate_text;
+    const char *samples_text;
+    char *next;
+    uint32_t rate;
+
+    format = line + 16; /* SPK_AUDIO_START: */
+    next = strchr(format, ':');
+    if (!next || strncmp(format, "IMA4", 4) != 0)
+    {
+        speaker_audio_fail(1u);
+        return;
+    }
+
+    rate_text = next + 1;
+    next = strchr(rate_text, ':');
+    if (!next)
+    {
+        speaker_audio_fail(2u);
+        return;
+    }
+
+    rate = (uint32_t)atoi(rate_text);
+    samples_text = next + 1;
+
+    if (rate != 8000u && rate != 16000u)
+    {
+        speaker_audio_fail(3u);
+        return;
+    }
+
+    if (speaker_audio_active)
+    {
+        i2s_mic_speaker_stream_end();
+        speaker_audio_active = 0u;
+    }
+
+    speaker_audio_error = 0u;
+    speaker_audio_done_pending = 0u;
+    speaker_audio_error_pending = 0u;
+    speaker_audio_ready_pending = 0u;
+    speaker_audio_rx_pending = 0u;
+    speaker_audio_chunk_pending = 0u;
+    speaker_audio_error_code = 0u;
+    speaker_audio_sample_rate = rate;
+    speaker_audio_expected_samples = (uint32_t)atoi(samples_text);
+    speaker_audio_received_samples = 0u;
+    speaker_adpcm_predictor = 0;
+    speaker_adpcm_index = 0;
+
+    if (!i2s_mic_speaker_stream_begin(speaker_audio_sample_rate))
+    {
+        speaker_audio_fail(4u);
+        return;
+    }
+
+    speaker_audio_active = 1u;
+    speaker_audio_ready_pending = 1u;
+    display_show_system_hint("SPK_AUDIO_START");
+    display_update_bottom_hint("正在播放本地音频...");
+}
+
+static void speaker_audio_data(const char *encoded)
+{
+    uint16_t adpcm_len;
+    uint16_t pcm_len;
+
+    if (!speaker_audio_active || speaker_audio_error)
+        return;
+
+    speaker_audio_rx_pending = 1u;
+    pump_speaker_test_response(300u);
+
+    adpcm_len = base64_decode_bytes(encoded,
+                                    speaker_adpcm_buf,
+                                    (uint16_t)sizeof(speaker_adpcm_buf));
+    if (adpcm_len == 0u)
+    {
+        speaker_audio_fail(5u);
+        return;
+    }
+
+    pcm_len = speaker_adpcm_decode_block(speaker_adpcm_buf,
+                                         adpcm_len,
+                                         speaker_pcm_buf,
+                                         (uint16_t)SPK_AUDIO_PCM_MAX_SAMPLES);
+    if (pcm_len == 0u)
+    {
+        speaker_audio_fail(6u);
+        return;
+    }
+
+    if (!i2s_mic_speaker_stream_write(speaker_pcm_buf, pcm_len))
+    {
+        speaker_audio_fail(7u);
+        pump_speaker_test_response(1200u);
+        return;
+    }
+
+    speaker_audio_received_samples += pcm_len;
+    speaker_audio_chunk_pending = 1u;
+    pump_speaker_test_response(1200u);
+}
+
+static void speaker_audio_finish(void)
+{
+    if (speaker_audio_active)
+    {
+        i2s_mic_speaker_stream_end();
+        speaker_audio_active = 0u;
+    }
+
+    if (speaker_audio_error)
+    {
+        speaker_audio_error_pending = 1u;
+    }
+    else
+    {
+        speaker_audio_done_pending = 1u;
+        display_show_system_hint("SPK_AUDIO_DONE");
+        if (sys_state == STATE_IDLE)
+        {
+            display_update_bottom_hint("K1:录音 K2:发送/新建");
+        }
+    }
+}
+
 /* ===================== TCP 下行消息处理 ===================== */
 
 static void handle_tcp_downlink(void)
 {
-    char line[160];
-    uint8_t loop_guard = 6;
+    static char line[720];
+    uint8_t loop_guard = 12;
 
     while (loop_guard-- > 0 && esp8266_tcp_read_line(line, sizeof(line)))
     {
@@ -406,6 +687,22 @@ static void handle_tcp_downlink(void)
             speaker_volume_done_pending = 1u;
             pump_speaker_test_response(1200u);
             (void)i2s_mic_play_volume_steps(levels, count);
+        }
+        else if (strncmp(line, "SPK_AUDIO_START:", 16) == 0)
+        {
+            speaker_audio_start(line);
+        }
+        else if (strncmp(line, "SPK_AUDIO_DATA:", 15) == 0)
+        {
+            speaker_audio_data(line + 15);
+        }
+        else if (strcmp(line, "SPK_AUDIO_END") == 0)
+        {
+            speaker_audio_finish();
+        }
+        else if (strcmp(line, "SPK_AUDIO_CANCEL") == 0)
+        {
+            speaker_audio_fail(8u);
         }
         else if (strncmp(line, "MIC_REC:", 8) == 0)
         {
@@ -646,6 +943,113 @@ static void try_send_speaker_volume_done(void)
     }
 }
 
+static void try_send_speaker_audio_done(void)
+{
+    esp8266_send_result_t send_ret;
+
+    if (!speaker_audio_done_pending)
+        return;
+
+    if (!tcp_ready_for_send())
+        return;
+
+    if (esp8266_tx_in_progress())
+        return;
+
+    send_ret = esp8266_tcp_send_line_async("SPK_AUDIO_DONE");
+    if (send_ret == ESP8266_SEND_OK)
+    {
+        speaker_audio_done_pending = 0u;
+    }
+}
+
+static void try_send_speaker_audio_ready(void)
+{
+    esp8266_send_result_t send_ret;
+
+    if (!speaker_audio_ready_pending)
+        return;
+
+    if (!tcp_ready_for_send())
+        return;
+
+    if (esp8266_tx_in_progress())
+        return;
+
+    send_ret = esp8266_tcp_send_line_async("SPK_AUDIO_READY");
+    if (send_ret == ESP8266_SEND_OK)
+    {
+        speaker_audio_ready_pending = 0u;
+    }
+}
+
+static void try_send_speaker_audio_rx(void)
+{
+    esp8266_send_result_t send_ret;
+
+    if (!speaker_audio_rx_pending)
+        return;
+
+    if (!tcp_ready_for_send())
+        return;
+
+    if (esp8266_tx_in_progress())
+        return;
+
+    send_ret = esp8266_tcp_send_line_async("SPK_AUDIO_RX");
+    if (send_ret == ESP8266_SEND_OK)
+    {
+        speaker_audio_rx_pending = 0u;
+    }
+}
+
+static void try_send_speaker_audio_chunk(void)
+{
+    esp8266_send_result_t send_ret;
+
+    if (!speaker_audio_chunk_pending)
+        return;
+
+    if (!tcp_ready_for_send())
+        return;
+
+    if (esp8266_tx_in_progress())
+        return;
+
+    send_ret = esp8266_tcp_send_line_async("SPK_AUDIO_CHUNK");
+    if (send_ret == ESP8266_SEND_OK)
+    {
+        speaker_audio_chunk_pending = 0u;
+    }
+}
+
+static void try_send_speaker_audio_error(void)
+{
+    esp8266_send_result_t send_ret;
+    char line[24];
+
+    if (!speaker_audio_error_pending)
+        return;
+
+    if (!tcp_ready_for_send())
+        return;
+
+    if (esp8266_tx_in_progress())
+        return;
+
+    snprintf(line, sizeof(line), "SPK_AUDIO_ERR:%u", (unsigned)speaker_audio_error_code);
+    send_ret = esp8266_tcp_send_line_async(line);
+    if (send_ret == ESP8266_SEND_OK)
+    {
+        speaker_audio_error_pending = 0u;
+        display_show_system_hint("SPK_AUDIO_ERR");
+        if (sys_state == STATE_IDLE)
+        {
+            display_update_bottom_hint("K1:录音 K2:发送/新建");
+        }
+    }
+}
+
 static void pump_speaker_test_response(uint32_t timeout_ms)
 {
     uint32_t start = HAL_GetTick();
@@ -656,12 +1060,22 @@ static void pump_speaker_test_response(uint32_t timeout_ms)
         try_send_speaker_tone_done();
         try_send_speaker_sweep_done();
         try_send_speaker_volume_done();
+        try_send_speaker_audio_ready();
+        try_send_speaker_audio_rx();
+        try_send_speaker_audio_chunk();
+        try_send_speaker_audio_done();
+        try_send_speaker_audio_error();
         esp8266_poll();
 
         if (!speaker_test_ok_pending &&
             !speaker_tone_done_pending &&
             !speaker_sweep_done_pending &&
             !speaker_volume_done_pending &&
+            !speaker_audio_ready_pending &&
+            !speaker_audio_rx_pending &&
+            !speaker_audio_chunk_pending &&
+            !speaker_audio_done_pending &&
+            !speaker_audio_error_pending &&
             !esp8266_tx_in_progress() &&
             esp8266_tx_queue_is_empty())
         {
@@ -1044,6 +1458,11 @@ int main(void)
         try_send_speaker_tone_done();
         try_send_speaker_sweep_done();
         try_send_speaker_volume_done();
+        try_send_speaker_audio_ready();
+        try_send_speaker_audio_rx();
+        try_send_speaker_audio_chunk();
+        try_send_speaker_audio_done();
+        try_send_speaker_audio_error();
         try_send_mic_rec_done();
 
         {

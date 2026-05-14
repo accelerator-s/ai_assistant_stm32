@@ -28,6 +28,7 @@ static volatile uint16_t startup_discard_counter = 0;
 
 /* 录音状态标志 */
 static volatile uint8_t is_recording = 0;
+static volatile uint8_t is_speaker_streaming = 0;
 
 /* 数据就绪回调 */
 static i2s_mic_callback_t user_callback = NULL;
@@ -131,6 +132,59 @@ static HAL_StatusTypeDef i2s_config_master_tx(uint32_t audio_freq)
     hi2s2.Init.CPOL = I2S_CPOL_LOW;
 
     return HAL_I2S_Init(&hi2s2);
+}
+
+static void i2s_dma_init(void);
+
+static uint32_t i2s_normalize_speaker_rate(uint32_t sample_rate_hz)
+{
+    switch (sample_rate_hz)
+    {
+    case 8000u:
+        return I2S_AUDIOFREQ_8K;
+    case 16000u:
+        return I2S_AUDIOFREQ_16K;
+    case 32000u:
+        return I2S_AUDIOFREQ_32K;
+    case 44100u:
+        return I2S_AUDIOFREQ_44K;
+    case 48000u:
+        return I2S_AUDIOFREQ_48K;
+    default:
+        return I2S_AUDIOFREQ_16K;
+    }
+}
+
+static uint8_t i2s_restore_microphone_rx(void)
+{
+    uint8_t ok = 1u;
+
+    (void)HAL_I2S_DeInit(&hi2s2);
+    i2s_gpio_init();
+    if (i2s_config_master_rx() == HAL_OK)
+    {
+        i2s_dma_init();
+    }
+    else
+    {
+        ok = 0u;
+    }
+
+    memset(i2s_dma_buf, 0, sizeof(i2s_dma_buf));
+    dbg_callback_count = 0u;
+    startup_discard_counter = 0u;
+    is_recording = 0u;
+
+    if (I2S_MIC_SLOT_SEL == I2S_MIC_SLOT_AUTO)
+    {
+        slot_detected = 0u;
+        slot_offset_runtime = 0u;
+        detect_callback_count = 0u;
+        detect_energy_pos0 = 0u;
+        detect_energy_pos1 = 0u;
+    }
+
+    return ok;
 }
 
 /**
@@ -813,4 +867,85 @@ uint8_t i2s_mic_play_volume_steps(const uint8_t *levels_percent, uint8_t count)
     }
 
     return ok;
+}
+
+uint8_t i2s_mic_speaker_stream_begin(uint32_t sample_rate_hz)
+{
+    uint32_t i2s_rate = i2s_normalize_speaker_rate(sample_rate_hz);
+
+    if (is_speaker_streaming)
+    {
+        i2s_mic_speaker_stream_end();
+    }
+
+    if (is_recording)
+    {
+        HAL_I2S_DMAStop(&hi2s2);
+        is_recording = 0u;
+    }
+
+    i2s_speaker_gpio_init();
+    (void)HAL_I2S_DeInit(&hi2s2);
+
+    if (i2s_config_master_tx(i2s_rate) != HAL_OK)
+    {
+        (void)i2s_restore_microphone_rx();
+        return 0u;
+    }
+
+    is_speaker_streaming = 1u;
+    return 1u;
+}
+
+uint8_t i2s_mic_speaker_stream_write(const int16_t *samples, uint16_t sample_count)
+{
+    enum
+    {
+        STREAM_FRAMES_PER_CHUNK = 64u
+    };
+
+    uint16_t tx_buf[STREAM_FRAMES_PER_CHUNK * 2u];
+    uint16_t sent = 0u;
+
+    if (!is_speaker_streaming || !samples || sample_count == 0u)
+        return 0u;
+
+    while (sent < sample_count)
+    {
+        uint16_t frames_this_chunk = (uint16_t)(sample_count - sent);
+        uint16_t i;
+
+        if (frames_this_chunk > STREAM_FRAMES_PER_CHUNK)
+            frames_this_chunk = STREAM_FRAMES_PER_CHUNK;
+
+        for (i = 0u; i < frames_this_chunk; i++)
+        {
+            uint16_t sample = (uint16_t)samples[sent + i];
+            tx_buf[i * 2u] = sample;
+            tx_buf[i * 2u + 1u] = sample;
+        }
+
+        if (HAL_I2S_Transmit(&hi2s2, tx_buf, (uint16_t)(frames_this_chunk * 2u), 500u) != HAL_OK)
+        {
+            return 0u;
+        }
+
+        sent = (uint16_t)(sent + frames_this_chunk);
+    }
+
+    return 1u;
+}
+
+void i2s_mic_speaker_stream_end(void)
+{
+    if (!is_speaker_streaming)
+        return;
+
+    is_speaker_streaming = 0u;
+    (void)i2s_restore_microphone_rx();
+}
+
+uint8_t i2s_mic_speaker_stream_is_active(void)
+{
+    return is_speaker_streaming;
 }

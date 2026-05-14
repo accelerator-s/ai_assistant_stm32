@@ -27,6 +27,56 @@ export default {
             style="margin-bottom: 16px"
           />
 
+          <el-card
+            shadow="hover"
+            class="step-card"
+            :class="{
+              'step-success': localState.status === 'success',
+              'step-error': localState.status === 'error'
+            }"
+            style="margin-bottom: 16px"
+          >
+            <div class="step-header">
+              <div class="step-icon">♪</div>
+              <div class="step-title">播放本地 WAV</div>
+              <el-button
+                type="primary"
+                size="small"
+                :disabled="!selectedFile || localState.loading"
+                :loading="localState.loading"
+                @click="playLocalAudio"
+              >
+                开始播放
+              </el-button>
+            </div>
+            <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:10px;">
+              <el-upload
+                :auto-upload="false"
+                :limit="1"
+                accept=".wav,audio/wav"
+                :on-change="handleLocalFileChange"
+                :on-remove="handleLocalFileRemove"
+              >
+                <el-button size="small">选择 WAV</el-button>
+              </el-upload>
+              <span class="step-desc" v-if="selectedFile">{{ selectedFile.name }}</span>
+            </div>
+
+            <el-progress
+              v-if="localState.loading || localState.progress > 0"
+              :percentage="localState.progress || 0"
+              :status="progressStatus(localState.status, localState.loading)"
+              :stroke-width="8"
+              style="margin: 10px 0 6px 0"
+            />
+            <div v-if="localState.hint" class="step-desc" style="margin-bottom: 4px;">
+              {{ localState.hint }}
+            </div>
+            <div v-if="localState.result" class="step-result" :class="'text-' + localState.status">
+              {{ localState.result }}
+            </div>
+          </el-card>
+
           <div class="test-steps">
             <el-card
               v-for="(item, index) in testCases"
@@ -77,6 +127,16 @@ export default {
   setup() {
     const testCases = ref([]);
     const states = ref({});
+    const selectedFile = ref(null);
+    const localState = ref({
+      loading: false,
+      status: "pending",
+      progress: 0,
+      hint: "",
+      result: "",
+      jobId: "",
+      pollToken: 0,
+    });
     const loadingCases = ref(false);
     const disposed = ref(false);
 
@@ -101,6 +161,10 @@ export default {
 
     const setCaseState = (caseId, patch) => {
       states.value[caseId] = { ...ensureState(caseId), ...patch };
+    };
+
+    const setLocalState = (patch) => {
+      localState.value = { ...localState.value, ...patch };
     };
 
     const progressStatus = (status, loading) => {
@@ -193,6 +257,91 @@ export default {
       }
     };
 
+    const handleLocalFileChange = (file) => {
+      selectedFile.value = file?.raw || null;
+      setLocalState({
+        status: "pending",
+        progress: 0,
+        hint: "",
+        result: "",
+        jobId: "",
+      });
+    };
+
+    const handleLocalFileRemove = () => {
+      selectedFile.value = null;
+    };
+
+    const playLocalAudio = async () => {
+      if (!selectedFile.value) return;
+
+      const token = Date.now();
+      setLocalState({
+        loading: true,
+        status: "pending",
+        progress: 0,
+        hint: "",
+        result: "",
+        jobId: "",
+        pollToken: token,
+      });
+
+      try {
+        const submitRes = await api.playLocalSpeakerAudio(selectedFile.value);
+        const jobId = submitRes?.job_id;
+        if (!submitRes?.success || !jobId) {
+          throw new Error(submitRes?.context || submitRes?.message || "任务提交失败");
+        }
+
+        setLocalState({
+          progress: 5,
+          hint: submitRes.message || "任务已提交，正在准备播放...",
+          jobId,
+        });
+
+        const started = Date.now();
+        while (!disposed.value && localState.value.pollToken === token) {
+          const resp = await api.getSpeakerTestJob(jobId);
+          const job = resp?.job;
+          if (!job) throw new Error("任务不存在");
+
+          setLocalState({
+            progress: typeof job.progress === "number" ? job.progress : 0,
+            hint: job.message || "",
+            jobId: job.job_id || jobId,
+          });
+
+          if (job.status === "success") {
+            setLocalState({
+              loading: false,
+              status: "success",
+              progress: 100,
+              result: job?.result?.context || "本地音频播放完成",
+            });
+            return;
+          }
+          if (job.status === "error") {
+            throw new Error(job.error || job.message || "本地音频播放失败");
+          }
+          if (job.status === "cancelled") throw new Error("任务已取消");
+          if (Date.now() - started > 120000) {
+            try {
+              await api.cancelSpeakerTestJob(jobId);
+            } catch (_) {}
+            throw new Error("任务执行超时");
+          }
+
+          await sleep(500);
+        }
+      } catch (err) {
+        setLocalState({
+          loading: false,
+          status: "error",
+          result: err?.message || "请求失败，请重试",
+        });
+      }
+    };
+
     onMounted(loadCases);
     onBeforeUnmount(() => {
       disposed.value = true;
@@ -201,9 +350,14 @@ export default {
     return {
       testCases,
       states,
+      selectedFile,
+      localState,
       loadingCases,
       loadCases,
       runCase,
+      handleLocalFileChange,
+      handleLocalFileRemove,
+      playLocalAudio,
       progressStatus,
     };
   },

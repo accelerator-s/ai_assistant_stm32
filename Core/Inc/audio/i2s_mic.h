@@ -127,4 +127,28 @@ uint8_t i2s_mic_play_sweep(uint16_t start_hz, uint16_t end_hz, uint16_t duration
  */
 uint8_t i2s_mic_play_volume_steps(const uint8_t *levels_percent, uint8_t count);
 
+/**
+ * Start a streaming speaker playback session on I2S2.
+ * The microphone RX configuration is restored by i2s_mic_speaker_stream_end().
+ *
+ * @param sample_rate_hz Supported values: 8000, 16000, 32000, 44100, 48000.
+ * @return 1=stream started, 0=I2S TX setup failed
+ */
+uint8_t i2s_mic_speaker_stream_begin(uint32_t sample_rate_hz);
+
+/**
+ * Write mono PCM16 samples to the current speaker stream.
+ * Samples are duplicated to both I2S slots for MAX98357A compatibility.
+ *
+ * @return 1=all samples transmitted, 0=no stream or transmit failed
+ */
+uint8_t i2s_mic_speaker_stream_write(const int16_t *samples, uint16_t sample_count);
+
+/**
+ * Stop the current speaker stream and restore microphone RX mode.
+ */
+void i2s_mic_speaker_stream_end(void);
+
+uint8_t i2s_mic_speaker_stream_is_active(void);
+
 #endif /* __I2S_MIC_H */
