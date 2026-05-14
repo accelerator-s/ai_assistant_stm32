@@ -22,6 +22,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef ESP8266_USART_FALLBACK_BAUDRATE
+#define ESP8266_USART_FALLBACK_BAUDRATE 115200u
+#endif
+
 /* ==================== 私有变量 ==================== */
 
 /* USART3 句柄 */
@@ -86,6 +90,7 @@ static init_phase_t s_phase = INIT_POWERON;
 static uint32_t s_phase_tick;
 static uint8_t s_retry_count;
 static uint8_t s_use_cwjap_def;
+static uint8_t s_at_fallback_baud_tried;
 
 /* 时序常量 */
 #define AT_RETRIES 3u
@@ -1080,9 +1085,6 @@ static void init_poll(void)
         break;
 
     case INIT_AT_SEND:
-        if (huart_esp8266.Init.BaudRate != ESP8266_USART_BAUDRATE)
-            esp8266_uart_set_baud(ESP8266_USART_BAUDRATE);
-
         esp8266_save_baud_debug("AT@");
         if (esp8266_send_cmd_now("AT"))
         {
@@ -1094,6 +1096,7 @@ static void init_poll(void)
         if (esp8266_check_resp("OK"))
         {
             s_retry_count = 0u;
+            s_at_fallback_baud_tried = 0u;
             esp8266_save_baud_debug("UART=");
             esp8266_set_phase(INIT_UART_DEF_SEND);
         }
@@ -1102,6 +1105,14 @@ static void init_poll(void)
             if (++s_retry_count < AT_RETRIES)
             {
                 esp8266_uart_recover();
+                esp8266_set_phase(INIT_AT_SEND);
+            }
+            else if (!s_at_fallback_baud_tried &&
+                     ESP8266_USART_FALLBACK_BAUDRATE != ESP8266_USART_BAUDRATE)
+            {
+                s_at_fallback_baud_tried = 1u;
+                s_retry_count = 0u;
+                esp8266_uart_set_baud(ESP8266_USART_FALLBACK_BAUDRATE);
                 esp8266_set_phase(INIT_AT_SEND);
             }
             else
@@ -1140,6 +1151,8 @@ static void init_poll(void)
         if (esp8266_check_resp("OK"))
         {
             s_retry_count = 0u;
+            if (huart_esp8266.Init.BaudRate != ESP8266_USART_BAUDRATE)
+                esp8266_uart_set_baud(ESP8266_USART_BAUDRATE);
             esp8266_set_phase(INIT_ATE0_SEND);
         }
         else if (esp8266_phase_timeout(AT_CMD_TIMEOUT))
@@ -1322,6 +1335,7 @@ void esp8266_init(void)
     s_status = ESP8266_STATUS_INITIALIZING;
     s_retry_count = 0u;
     s_use_cwjap_def = 0u;
+    s_at_fallback_baud_tried = 0u;
     s_tcp_server_port = 0u;
     s_tcp_parse_offset = 0u;
 

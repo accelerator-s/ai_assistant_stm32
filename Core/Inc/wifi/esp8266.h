@@ -24,11 +24,11 @@ extern "C"
     /* ==================== 基本配置 ==================== */
 
 #ifndef ESP8266_TX_QUEUE_CAPACITY
-#define ESP8266_TX_QUEUE_CAPACITY 8U
+#define ESP8266_TX_QUEUE_CAPACITY 4U
 #endif
 
 #ifndef ESP8266_MAX_TX_PAYLOAD
-#define ESP8266_MAX_TX_PAYLOAD 1024U
+#define ESP8266_MAX_TX_PAYLOAD 2048U
 #endif
 
     /* ==================== 连接状态 ==================== */

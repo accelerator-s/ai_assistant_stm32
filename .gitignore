@@ -33,4 +33,4 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-data/audio/
+Core/Inc/wifi/wifi_config.h

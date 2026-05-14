@@ -12,6 +12,7 @@ mic_test_bp = Blueprint("mic_test", __name__)
 HARDWARE_TEST_TIMEOUT = 5.0
 HARDWARE_TEST_RETRIES = 2
 RECORD_TEST_TIMEOUT = 25.0
+RECORD_UPLOAD_GRACE_TIMEOUT = 35.0
 RECOGNIZE_TEST_TIMEOUT = 30.0
 
 
@@ -101,11 +102,12 @@ def _run_record_test(ctx):
         raise RuntimeError("设备未连接")
 
     record_seconds = 3
+    record_timeout = max(RECORD_TEST_TIMEOUT, record_seconds + RECORD_UPLOAD_GRACE_TIMEOUT)
     ctx.set_progress(10, f"正在下发 {record_seconds} 秒录音命令")
     logger.info("麦克风录音测试: 请求 %d 秒录音", record_seconds)
 
     waiter = device_manager.register_waiter(
-        expected="MIC_REC_DONE", timeout=RECORD_TEST_TIMEOUT
+        expected="MIC_REC_DONE", timeout=record_timeout
     )
 
     try:
@@ -114,11 +116,11 @@ def _run_record_test(ctx):
 
         ctx.set_progress(30, f"设备正在录制 {record_seconds} 秒音频…")
         response = device_manager.await_waiter(
-            waiter["waiter_id"], timeout=RECORD_TEST_TIMEOUT
+            waiter["waiter_id"], timeout=record_timeout
         )
         if not response:
             raise RuntimeError(
-                f"设备未在 {RECORD_TEST_TIMEOUT:.0f} 秒内返回 MIC_REC_DONE"
+                f"设备未在 {record_timeout:.0f} 秒内返回 MIC_REC_DONE"
             )
 
         if not response.startswith("MIC_REC_DONE"):
