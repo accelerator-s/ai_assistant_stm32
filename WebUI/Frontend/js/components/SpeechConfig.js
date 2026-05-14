@@ -30,6 +30,10 @@ export default {
               </el-select>
             </el-form-item>
             <template v-if="config.speech.provider === 'tencent'">
+              <el-form-item label="AppID">
+                <el-input v-model="config.speech.app_id" placeholder="Tencent Cloud AppID"></el-input>
+                <span class="az-helper">实时语音识别 WebSocket 地址需要 AppID</span>
+              </el-form-item>
               <el-form-item label="SecretId">
                 <el-input v-model="config.speech.secret_id" placeholder="Tencent Cloud SecretId"></el-input>
                 <span class="az-helper">腾讯云访问秘钥 SecretId</span>
@@ -96,6 +100,7 @@ export default {
           provider: props.config.speech.provider,
           base_url: props.config.speech.base_url,
           api_key: props.config.speech.api_key,
+          app_id: props.config.speech.app_id,
           secret_id: props.config.speech.secret_id,
           secret_key: props.config.speech.secret_key,
           region: props.config.speech.region,

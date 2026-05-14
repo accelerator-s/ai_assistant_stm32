@@ -5,3 +5,4 @@ PyJWT>=2.8
 httpx>=0.27
 gunicorn>=22.0
 tencentcloud-sdk-python>=3.0.0
+websocket-client>=1.8.0

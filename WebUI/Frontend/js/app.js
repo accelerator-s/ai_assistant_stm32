@@ -163,7 +163,7 @@ const App = {
 
     const config = ref({
       device:   { tcp_host: '0.0.0.0', tcp_port: 8266, device_name: 'STM32F103VET6', audio_sample_rate: 16000, audio_bit_depth: 16 },
-      speech:   { provider: 'openai_whisper', base_url: '', api_key: '', model: 'whisper-1', language: 'zh' },
+      speech:   { provider: 'openai_whisper', app_id: '', base_url: '', api_key: '', secret_id: '', secret_key: '', region: 'ap-shanghai', model: 'whisper-1', language: 'zh' },
       llm:      { base_url: '', api_key: '', model: 'gpt-4', system_prompt: '', max_tokens: 512, temperature: 0.7 },
       tts:      { provider: 'openai_tts', base_url: '', api_key: '', model: 'tts-1', voice: 'alloy' },
       advanced: { service_port: 5000, log_level: 'INFO', session_expiry_hours: 24, max_history_per_session: 50, audio_buffer_timeout_sec: 30 },

@@ -89,6 +89,7 @@ def test_speech_service():
 
     base_url = config.get("speech.base_url", "")
     api_key = config.get("speech.api_key", "")
+    app_id = config.get("speech.app_id", "")
     secret_id = config.get("speech.secret_id", "")
     secret_key = config.get("speech.secret_key", "")
     region = config.get("speech.region", "ap-shanghai")
@@ -99,6 +100,7 @@ def test_speech_service():
     body = request.get_json(silent=True) or {}
     base_url = body.get("base_url") or base_url
     api_key = body.get("api_key") or api_key
+    app_id = body.get("app_id") or app_id
     secret_id = body.get("secret_id") or secret_id
     secret_key = body.get("secret_key") or secret_key
     region = body.get("region") or region
@@ -106,6 +108,8 @@ def test_speech_service():
     provider = body.get("provider") or provider
 
     if provider == "tencent":
+        if not app_id:
+            return jsonify({"success": False, "message": "未配置腾讯云 AppID，实时语音识别不可用"})
         if not secret_id or not secret_key:
             return jsonify({"success": False, "message": "未配置腾讯云 SecretId 或 SecretKey"})
         try:
