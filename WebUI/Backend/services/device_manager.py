@@ -44,6 +44,7 @@ class DeviceConnection:
         self.audio_pcm_path: Path | None = None
         self.audio_bytes = 0
         self.audio_started_at = 0.0
+        self.audio_asr_session = None
 
     def __repr__(self):
         return f"<DeviceConnection {self.addr[0]}:{self.addr[1]}>"
@@ -224,7 +225,10 @@ class DeviceManager:
 
         payload = command if command.endswith("\n") else f"{command}\n"
         try:
-            client.send_queue.put_nowait(payload.encode("utf-8"))
+            # The STM32 LCD renderer indexes a GB2312/GBK font from external flash.
+            # Keep ASCII protocol prefixes unchanged, but encode Chinese payloads as
+            # GBK so the firmware does not interpret UTF-8 byte triples as GBK pairs.
+            client.send_queue.put_nowait(payload.encode("gbk", errors="replace"))
             return True
         except Exception:
             self._remove_client(client)
@@ -264,6 +268,10 @@ class DeviceManager:
 
         if role == "user":
             prefix = "STT:"
+        elif role == "user_partial":
+            prefix = "STT_PART:"
+        elif role == "user_final":
+            prefix = "STT_FINAL:"
         elif role == "assistant":
             prefix = "AI:"
         else:
@@ -366,6 +374,41 @@ class DeviceManager:
             self._latest_audio = None
 
         logger.info("开始接收设备音频流: %s", pcm_path.name)
+        self._start_streaming_asr(device)
+
+    def _start_streaming_asr(self, device: DeviceConnection) -> None:
+        try:
+            from ..app import app_state
+            from .tencent_streaming_asr import TencentStreamingAsrSession
+
+            config = app_state.get("config")
+            provider = (config.get("speech.provider", "") if config else "").lower()
+            if provider not in {"tencent", "tencent_asr"}:
+                device.audio_asr_session = None
+                return
+
+            def on_text(text: str, is_final: bool) -> None:
+                self.send_text_to_device(
+                    text,
+                    role="user_final" if is_final else "user_partial",
+                )
+
+            session = TencentStreamingAsrSession(
+                config=config,
+                sample_rate=self._get_audio_sample_rate(),
+                on_text=on_text,
+            )
+            if session.start():
+                device.audio_asr_session = session
+                logger.info("腾讯云实时 ASR 会话已建立")
+            else:
+                device.audio_asr_session = None
+                if session.error:
+                    self.send_text_to_device(session.error, role="system")
+        except Exception:
+            device.audio_asr_session = None
+            logger.exception("启动腾讯云实时 ASR 失败")
+            self.send_text_to_device("启动腾讯云实时识别失败", role="system")
 
     def _append_audio_bytes(self, device: DeviceConnection, payload: bytes) -> None:
         if not device.audio_capture_active:
@@ -378,28 +421,37 @@ class DeviceManager:
             with open(device.audio_pcm_path, "ab") as f:
                 f.write(payload)
             device.audio_bytes += len(payload)
+            session = device.audio_asr_session
+            if session:
+                session.send_audio(payload)
         except Exception:
             logger.exception("写入音频分片失败")
 
     def _finish_audio_capture(
         self, device: DeviceConnection, sample_rate_override: int | None = None
-    ) -> None:
+    ) -> dict[str, object] | None:
         if not device.audio_capture_active:
-            return
+            return None
 
         device.audio_capture_active = False
         pcm_path = device.audio_pcm_path
         device.audio_pcm_path = None
+        asr_session = device.audio_asr_session
+        device.audio_asr_session = None
 
         if not pcm_path or not pcm_path.exists():
-            return
+            if asr_session:
+                asr_session.close()
+            return None
 
         if device.audio_bytes <= 0:
             try:
                 pcm_path.unlink(missing_ok=True)
             except Exception:
                 pass
-            return
+            if asr_session:
+                asr_session.close()
+            return None
 
         wav_path = pcm_path.with_suffix(".wav")
         sample_rate = (
@@ -415,21 +467,101 @@ class DeviceManager:
                 wavf.writeframes(src.read())
         except Exception:
             logger.exception("PCM 转 WAV 失败")
-            return
+            return None
 
         duration = device.audio_bytes / float(sample_rate * 2)
         url = f"/media/{wav_path.name}"
+        audio_info = {
+            "path": str(wav_path),
+            "url": url,
+            "bytes": int(device.audio_bytes),
+            "duration": duration,
+            "sample_rate": sample_rate,
+            "created_at": time.time(),
+            "asr_session": asr_session,
+        }
         with self._audio_lock:
-            self._latest_audio = {
-                "path": str(wav_path),
-                "url": url,
-                "bytes": int(device.audio_bytes),
-                "duration": duration,
-                "sample_rate": sample_rate,
-                "created_at": time.time(),
-            }
+            latest_audio = dict(audio_info)
+            latest_audio.pop("asr_session", None)
+            self._latest_audio = latest_audio
 
         logger.info("音频接收完成: %s (%.2fs)", wav_path.name, duration)
+        return audio_info
+
+    def _process_completed_recording_async(
+        self, device: DeviceConnection, audio_info: dict[str, object]
+    ) -> None:
+        worker = threading.Thread(
+            target=self._process_completed_recording,
+            args=(device, audio_info),
+            daemon=True,
+        )
+        worker.start()
+
+    def _process_completed_recording(
+        self, device: DeviceConnection, audio_info: dict[str, object]
+    ) -> None:
+        audio_path = str(audio_info.get("path") or "")
+        if not audio_path:
+            self.send_text_to_device("录音文件路径无效", role="system")
+            return
+
+        try:
+            from ..app import app_state
+            from .chat_service import get_llm_reply
+            from .speech_service import recognize_audio
+
+            asr_session = audio_info.get("asr_session")
+            config = app_state.get("config")
+            provider = (config.get("speech.provider", "") if config else "").lower()
+            if not asr_session and provider in {"tencent", "tencent_asr"}:
+                self.send_text_to_device("腾讯云实时识别会话未建立，请检查 AppID/网络/密钥配置", role="system")
+                return
+
+            if asr_session:
+                recognized_text = (asr_session.finish() or "").strip()
+            else:
+                recognized_text = (recognize_audio(audio_path) or "").strip()
+
+            if not recognized_text:
+                self.send_text_to_device("未识别到有效语音", role="system")
+                return
+
+            error_prefixes = (
+                "出错了",
+                "未配置",
+                "未安装",
+                "音频文件",
+                "腾讯云语音识别失败",
+                "不支持的语音识别服务商",
+            )
+            if recognized_text.startswith(error_prefixes):
+                self.send_text_to_device(recognized_text, role="system")
+                return
+
+            if asr_session and recognized_text != getattr(asr_session, "last_emitted_text", ""):
+                self.send_text_to_device(recognized_text, role="user_final")
+            elif not asr_session:
+                self.send_text_to_device(recognized_text, role="user")
+
+            db = app_state.get("db")
+            session_id = f"device_{device.addr[0].replace('.', '_')}"
+            if db:
+                if not db.get_session(session_id):
+                    db.create_session(session_id=session_id, title="设备语音会话")
+                db.add_message(session_id, "user", recognized_text)
+
+            reply_text = (get_llm_reply(session_id, recognized_text) or "").strip()
+            if not reply_text:
+                self.send_text_to_device("大模型未返回有效回复", role="system")
+                return
+
+            if db:
+                db.add_message(session_id, "assistant", reply_text)
+            self.send_text_to_device(reply_text, role="assistant")
+        except Exception:
+            logger.exception("处理设备录音对话失败")
+            self.send_text_to_device("云端处理录音失败", role="system")
 
     def _handle_text_line(self, device: DeviceConnection, text: str) -> None:
         if text == "HB":
@@ -450,8 +582,10 @@ class DeviceManager:
 
         if text == "REC_END":
             # 普通录音场景的唯一结束标记
-            self._finish_audio_capture(device)
+            audio_info = self._finish_audio_capture(device)
             self._notify_waiters(text)
+            if audio_info:
+                self._process_completed_recording_async(device, audio_info)
             return
 
         if text.startswith("MIC_REC_DONE"):

@@ -108,6 +108,14 @@ void display_clear_messages(void);
 void display_add_message(msg_role_t role, const char *text);
 
 /**
+ * 更新最后一条同角色消息；若最后一条不是该角色，则追加新消息。
+ * 用于流式 ASR 中间结果刷新同一条用户气泡。
+ * @param role  消息角色
+ * @param text  消息文本（GBK编码字符串）
+ */
+void display_update_last_message(msg_role_t role, const char *text);
+
+/**
  * 显示系统提示信息（居中小字）
  * @param text 提示文本
  */
