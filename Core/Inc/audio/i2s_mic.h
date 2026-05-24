@@ -28,6 +28,13 @@
  * L/R=GND → 左声道, L/R=VCC → 右声道
  * 注意: STM32 I2S Master RX 的 DMA 帧起始声道可能与预期相反，
  *       因此提供运行时自动检测功能 */
+/* Shared I2S bus control for the 74HC125N + MAX98357A wiring.
+ * PB14 connects to 74HC125 1OE and MAX98357A SD.
+ * PB14 low enables MIC and shuts down speaker.
+ * PB14 high disables MIC and enables speaker. */
+#define I2S_BUS_CTRL_PORT GPIOB
+#define I2S_BUS_CTRL_PIN GPIO_PIN_14
+
 #define I2S_MIC_SLOT_LEFT  0u
 #define I2S_MIC_SLOT_RIGHT 1u
 #define I2S_MIC_SLOT_AUTO  2u   /* 自动检测有效声道 */
