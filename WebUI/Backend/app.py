@@ -12,6 +12,7 @@ from .database import DatabaseManager
 from .security import RateLimiter
 from .services.async_job_manager import AsyncJobManager
 from .services.device_manager import DeviceManager
+from .services.tts_service import synthesize as tts_synthesize
 
 # 配置日志
 logging.basicConfig(
@@ -36,6 +37,7 @@ _CONFIG_PATH = _ROOT_DIR / "config" / "default_config.json"
 _DB_PATH = _ROOT_DIR / "data" / "assistant.db"
 _FRONTEND_DIR = _ROOT_DIR / "Frontend"
 _MEDIA_DIR = _ROOT_DIR / "data" / "audio"
+_TTS_AUDIO_DIR = _ROOT_DIR / "data" / "tts"
 
 
 def create_app() -> Flask:
@@ -43,6 +45,7 @@ def create_app() -> Flask:
     app = Flask(__name__, static_folder=None)
     app.config["JSON_AS_ASCII"] = False
     _MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    _TTS_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
     # ---- 初始化核心组件 ----
     _init_components()
@@ -124,6 +127,26 @@ def create_app() -> Flask:
     def serve_media(filename):
         """分发设备录音文件，供页面回放。"""
         return send_from_directory(str(_MEDIA_DIR), filename)
+
+    # ---- TTS 测试接口 ----
+    @app.route("/api/tts/test", methods=["POST"])
+    def test_tts():
+        data = request.json or {}
+        text = data.get("text", "你好，这是测试语音")
+        result = tts_synthesize(
+            region=data.get("azure_region", ""),
+            subscription_key=data.get("azure_key", ""),
+            text=text,
+            output_dir=_TTS_AUDIO_DIR,
+            voice=data.get("azure_voice", "zh-CN-XiaoxiaoNeural"),
+        )
+        status_code = 200 if result["success"] else 400
+        return jsonify(result), status_code
+
+    @app.route("/tts/<path:filename>")
+    def serve_tts(filename):
+        """分发 TTS 生成的音频文件"""
+        return send_from_directory(str(_TTS_AUDIO_DIR), filename)
 
     # ---- 优雅关闭 ----
     import atexit

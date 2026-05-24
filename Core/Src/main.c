@@ -605,7 +605,23 @@ static void handle_tcp_downlink(void)
 
     while (loop_guard-- > 0 && esp8266_tcp_read_line(line, sizeof(line)))
     {
-        if (strncmp(line, "STT:", 4) == 0)
+        if (strncmp(line, "STT_PART:", 9) == 0)
+        {
+            display_update_last_message(MSG_ROLE_USER, line + 9);
+            if (sys_state == STATE_WAITING)
+            {
+                display_update_bottom_hint("正在识别...");
+            }
+        }
+        else if (strncmp(line, "STT_FINAL:", 10) == 0)
+        {
+            display_update_last_message(MSG_ROLE_USER, line + 10);
+            if (sys_state == STATE_WAITING)
+            {
+                display_update_bottom_hint("识别完成，思考中...");
+            }
+        }
+        else if (strncmp(line, "STT:", 4) == 0)
         {
             display_add_message(MSG_ROLE_USER, line + 4);
             if (sys_state == STATE_WAITING)

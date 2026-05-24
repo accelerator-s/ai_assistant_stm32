@@ -9,6 +9,7 @@ import StatusPanel         from '/static/js/components/StatusPanel.js';
 import DeviceConfig        from '/static/js/components/DeviceConfig.js';
 import SpeechConfig        from '/static/js/components/SpeechConfig.js';
 import LLMConfig           from '/static/js/components/LLMConfig.js';
+import TTSConfig from './components/TTSConfig.js';
 import ConversationHistory from '/static/js/components/ConversationHistory.js';
 import AdvancedSettings    from '/static/js/components/AdvancedSettings.js';
 import SecurityPanel       from '/static/js/components/SecurityPanel.js';
@@ -39,12 +40,13 @@ const ICONS = {
 
 const NAV_ITEMS = [
   { key: 'status',    label: '概览',       icon: 'dashboard', section: '监控' },
-  { key: 'mictest',   label: '麦克风',     icon: 'mic',       section: '配置' },
-  { key: 'speaker',   label: '音响',       icon: 'speaker',   section: '配置' },
+  { key: 'mictest',   label: '麦克风',     icon: 'mic',       section: '测试' },
+  { key: 'speaker',   label: '音响',       icon: 'speaker',   section: '测试' },
   { key: 'user',      label: '用户设置',   icon: 'device',    section: '配置' },
   { key: 'device',    label: '设备通信',   icon: 'device',    section: '配置' },
   { key: 'speech',    label: '语音识别',   icon: 'mic',       section: '配置' },
   { key: 'llm',       label: '大模型',     icon: 'openai',    section: '配置' },
+  { key: 'tts', label: 'TTS语音合成', icon: 'openai', section: '配置' },
   { key: 'history',   label: '对话历史',   icon: 'message',   section: '管理' },
   { key: 'ipban',     label: 'IP 安全',    icon: 'shield',    section: '安全' },
   { key: 'security',  label: '密码管理',   icon: 'lock',      section: '安全' },
@@ -163,7 +165,7 @@ const App = {
 
     const config = ref({
       device:   { tcp_host: '0.0.0.0', tcp_port: 8266, device_name: 'STM32F103VET6', audio_sample_rate: 16000, audio_bit_depth: 16 },
-      speech:   { provider: 'openai_whisper', base_url: '', api_key: '', model: 'whisper-1', language: 'zh' },
+      speech:   { provider: 'openai_whisper', app_id: '', base_url: '', api_key: '', secret_id: '', secret_key: '', region: 'ap-shanghai', model: 'whisper-1', language: 'zh' },
       llm:      { base_url: '', api_key: '', model: 'gpt-4', system_prompt: '', max_tokens: 512, temperature: 0.7 },
       tts:      { provider: 'openai_tts', base_url: '', api_key: '', model: 'tts-1', voice: 'alloy' },
       advanced: { service_port: 5000, log_level: 'INFO', session_expiry_hours: 24, max_history_per_session: 50, audio_buffer_timeout_sec: 30 },
@@ -217,6 +219,7 @@ const App = {
       device:   DeviceConfig,
       speech:   SpeechConfig,
       llm:      LLMConfig,
+      tts: TTSConfig,
       history:  ConversationHistory,
       advanced: AdvancedSettings,
       ipban:    SecurityPanel,
@@ -293,6 +296,7 @@ app.component('StatusPanel', StatusPanel);
 app.component('DeviceConfig', DeviceConfig);
 app.component('SpeechConfig', SpeechConfig);
 app.component('LLMConfig', LLMConfig);
+app.component('TTSConfig', TTSConfig);
 app.component('ConversationHistory', ConversationHistory);
 app.component('AdvancedSettings', AdvancedSettings);
 app.component('SecurityPanel', SecurityPanel);

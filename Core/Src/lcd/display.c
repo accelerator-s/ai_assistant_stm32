@@ -856,6 +856,37 @@ void display_add_message(msg_role_t role, const char *text)
     }
 }
 
+void display_update_last_message(msg_role_t role, const char *text)
+{
+    uint8_t idx;
+
+    if (!text || text[0] == '\0')
+        return;
+
+    if (msg_count == 0)
+    {
+        display_add_message(role, text);
+        return;
+    }
+
+    idx = (uint8_t)((msg_head + msg_count - 1u) % MSG_MAX_COUNT);
+    if (msg_buf[idx].role != role)
+    {
+        display_add_message(role, text);
+        return;
+    }
+
+    strncpy(msg_buf[idx].text, text, MSG_MAX_LEN - 1);
+    msg_buf[idx].text[MSG_MAX_LEN - 1] = '\0';
+    msg_buf[idx].text_len = (uint8_t)strlen(msg_buf[idx].text);
+
+    if (current_state == DISPLAY_STATE_CHAT ||
+        current_state == DISPLAY_STATE_CHAT_SCROLL)
+    {
+        redraw_chat_area();
+    }
+}
+
 void display_show_system_hint(const char *text)
 {
     display_add_message(MSG_ROLE_SYSTEM, text);
