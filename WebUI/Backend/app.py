@@ -2,9 +2,11 @@
 
 import logging
 import os
+import requests
+import io
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, send_file
 
 from .auth import AuthManager
 from .config import Config
@@ -125,7 +127,82 @@ def create_app() -> Flask:
         """分发设备录音文件，供页面回放。"""
         return send_from_directory(str(_MEDIA_DIR), filename)
 
-    # ---- 优雅关闭 ----
+        # ---- TTS 测试接口 ----
+    @app.route("/api/tts/test", methods=["POST"])
+    def test_tts():
+
+        data = request.json or {}
+
+        text = data.get("text", "你好，这是测试语音")
+
+        base_url = data.get("base_url", "").rstrip("/")
+        api_key = data.get("api_key", "")
+        model = data.get("model", "tts-1")
+        voice = data.get("voice", "alloy")
+
+        if not base_url:
+            return jsonify({
+                "success": False,
+                "message": "缺少 Base URL"
+            }), 400
+
+        if not api_key:
+            return jsonify({
+                "success": False,
+                "message": "缺少 API Key"
+            }), 400
+
+        try:
+
+            response = requests.post(
+
+                f"{base_url}/audio/speech",
+
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+
+                json={
+                    "model": model,
+                    "input": text,
+                    "voice": voice,
+                },
+
+                timeout=60,
+            )
+
+            if response.status_code != 200:
+
+                logger.error(
+                    f"TTS 请求失败: {response.text}"
+                )
+
+                return jsonify({
+                    "success": False,
+                    "message": response.text,
+                }), 500
+
+            return send_file(
+
+                io.BytesIO(response.content),
+
+                mimetype="audio/mpeg",
+
+                as_attachment=False,
+
+                download_name="tts.mp3",
+            )
+
+        except Exception as e:
+
+            logger.exception("TTS 接口异常")
+
+            return jsonify({
+                "success": False,
+                "message": str(e),
+            }), 500
+        # ---- 优雅关闭 ----
     import atexit
 
     atexit.register(_shutdown_components)
