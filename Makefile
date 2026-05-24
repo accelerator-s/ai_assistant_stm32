@@ -71,7 +71,16 @@ Core/Src/audio/dsp_config.c \
 Core/Src/system/system_state.c \
 Core/Src/system/system_controller.c \
 Core/Src/cloud/cloud_comm.c \
-Core/Src/audio/i2s_mic.c
+Core/Src/audio/i2s_mic.c \
+Core/Src/button/button_context.c \
+Core/Src/button/button_app.c \
+Core/Src/button/button_audio_buffer.c \
+Core/Src/button/button_audio_upload.c \
+Core/Src/button/button_key.c \
+Core/Src/button/button_mic_test.c \
+Core/Src/button/button_speaker_test.c \
+Core/Src/button/button_state_handlers.c \
+Core/Src/button/button_tcp.c
 
 # ASM sources
 ASM_SOURCES =  \
@@ -140,6 +149,7 @@ C_INCLUDES =  \
 -ICore/Inc/audio \
 -ICore/Inc/system \
 -ICore/Inc/cloud \
+-ICore/Inc/button \
 -IDrivers/STM32F1xx_HAL_Driver/Inc/Legacy \
 -IDrivers/STM32F1xx_HAL_Driver/Inc \
 -IDrivers/CMSIS/Device/ST/STM32F1xx/Include \

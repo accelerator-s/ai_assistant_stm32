@@ -1,0 +1,30 @@
+#include "button/button_context.h"
+
+sys_state_t sys_state = STATE_IDLE;
+uint32_t k2_press_tick = 0;
+uint8_t k2_press_count = 0;
+uint32_t k2_last_release_tick = 0;
+uint8_t k2_was_pressed = 0;
+uint32_t rec_start_tick = 0;
+uint8_t k1_no_tcp_hint_latched = 0;
+int16_t audio_upload_buffer[AUDIO_UPLOAD_BUFFER_SAMPLES];
+volatile uint16_t audio_upload_write_pos = 0;
+volatile uint16_t audio_upload_read_pos = 0;
+volatile uint8_t audio_upload_overflow = 0;
+volatile uint32_t audio_upload_dropped_samples = 0;
+int32_t audio_upload_downsample_acc = 0;
+uint16_t audio_upload_downsample_count = 0;
+volatile uint8_t rec_end_pending = 0;
+volatile uint8_t mic_rec_done_pending = 0;
+mic_probe_state_t mic_probe_state = MIC_PROBE_IDLE;
+uint32_t mic_probe_start_tick = 0;
+volatile uint16_t mic_probe_nonzero_count = 0;
+volatile uint16_t mic_probe_sample_count = 0;
+volatile uint8_t mic_probe_collecting = 0;
+mic_rec_test_state_t mic_rec_test_state = MIC_REC_TEST_IDLE;
+uint32_t mic_rec_test_start_tick = 0;
+uint32_t mic_rec_test_duration_ms = 3000u;
+uint8_t speaker_test_ok_pending = 0u;
+uint8_t speaker_tone_done_pending = 0u;
+uint8_t speaker_sweep_done_pending = 0u;
+uint8_t speaker_volume_done_pending = 0u;
