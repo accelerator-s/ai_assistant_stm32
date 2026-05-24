@@ -51,6 +51,39 @@ static volatile uint32_t detect_energy_pos1 = 0;   /* 偏移 1 累计绝对值 *
  * pos0 可能对应 L 也可能对应 R。使用运行时检测的
  * slot_offset_runtime（0 或 1）来选择有效声道。
  */
+/* PB14 drives both 74HC125 1OE and MAX98357A SD.
+ * Low: MIC path enabled, speaker muted. High: MIC path off, speaker enabled.
+ * With this one-wire hardware, idle uses the quiet record-side level. */
+static void i2s_bus_mode_idle(void)
+{
+    HAL_GPIO_WritePin(I2S_BUS_CTRL_PORT, I2S_BUS_CTRL_PIN, GPIO_PIN_RESET);
+}
+
+static void i2s_bus_mode_record(void)
+{
+    HAL_GPIO_WritePin(I2S_BUS_CTRL_PORT, I2S_BUS_CTRL_PIN, GPIO_PIN_RESET);
+}
+
+static void i2s_bus_mode_play(void)
+{
+    HAL_GPIO_WritePin(I2S_BUS_CTRL_PORT, I2S_BUS_CTRL_PIN, GPIO_PIN_SET);
+}
+
+static void i2s_bus_switch_init(void)
+{
+    GPIO_InitTypeDef gpio = {0};
+
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+
+    gpio.Pin = I2S_BUS_CTRL_PIN;
+    gpio.Mode = GPIO_MODE_OUTPUT_PP;
+    gpio.Pull = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOB, &gpio);
+
+    i2s_bus_mode_idle();
+}
+
 static uint16_t i2s_extract_pcm16(const uint16_t *src, uint16_t raw_len, int16_t *dst)
 {
     uint16_t i;
@@ -382,6 +415,7 @@ void i2s_mic_init(void)
 
     /* 初始化 GPIO */
     i2s_gpio_init();
+    i2s_bus_switch_init();
 
     /* 配置 I2S2 参数 */
     hi2s2.Instance = SPI2;
@@ -452,9 +486,15 @@ void i2s_mic_start(void)
      * 16B_EXTENDED 模式: HAL 内部 RxXferSize = Size（不双倍）
      * 传入 Size = I2S_DMA_BUF_SIZE，
      * DMA 传输 I2S_DMA_BUF_SIZE 个 halfword，正好填满缓冲区 */
+    i2s_bus_mode_record();
+
     if (HAL_I2S_Receive_DMA(&hi2s2, i2s_dma_buf, I2S_DMA_BUF_SIZE) == HAL_OK)
     {
         is_recording = 1;
+    }
+    else
+    {
+        i2s_bus_mode_idle();
     }
 }
 
@@ -462,11 +502,13 @@ void i2s_mic_stop(void)
 {
     if (!is_recording)
     {
+        i2s_bus_mode_idle();
         return;
     }
 
     HAL_I2S_DMAStop(&hi2s2);
     is_recording = 0;
+    i2s_bus_mode_idle();
 }
 
 uint8_t i2s_mic_is_recording(void)
@@ -500,9 +542,11 @@ uint8_t i2s_mic_probe(void)
 
     /* 使用阻塞方式接收少量数据（超时 200ms）
      * 16B_EXTENDED 模式 Size=32 -> 实际读 32 halfwords -> 16 帧 (L+R) */
+    i2s_bus_mode_record();
     HAL_StatusTypeDef status = HAL_I2S_Receive(&hi2s2, probe_raw_buf, 32, 200);
     if (status != HAL_OK)
     {
+        i2s_bus_mode_idle();
         return 0;
     }
 
@@ -513,10 +557,12 @@ uint8_t i2s_mic_probe(void)
     {
         if (probe_pcm_buf[i] != 0 && probe_pcm_buf[i] != (int16_t)0xFFFF)
         {
+            i2s_bus_mode_idle();
             return 1;
         }
     }
 
+    i2s_bus_mode_idle();
     return 0;
 }
 
@@ -557,6 +603,7 @@ uint8_t i2s_mic_play_tone(uint16_t frequency_hz, uint16_t duration_ms)
         half_period_frames = 1u;
 
     i2s_speaker_gpio_init();
+    i2s_bus_mode_play();
     (void)HAL_I2S_DeInit(&hi2s2);
 
     if (i2s_config_master_tx(I2S_AUDIOFREQ_16K) != HAL_OK)
@@ -622,6 +669,7 @@ uint8_t i2s_mic_play_tone(uint16_t frequency_hz, uint16_t duration_ms)
         detect_energy_pos1 = 0u;
     }
 
+    i2s_bus_mode_idle();
     return ok;
 }
 
@@ -662,6 +710,7 @@ uint8_t i2s_mic_play_sweep(uint16_t start_hz, uint16_t end_hz, uint16_t duration
     total_frames = ((uint32_t)duration_ms * SWEEP_SAMPLE_RATE) / 1000u;
 
     i2s_speaker_gpio_init();
+    i2s_bus_mode_play();
     (void)HAL_I2S_DeInit(&hi2s2);
 
     if (i2s_config_master_tx(I2S_AUDIOFREQ_16K) != HAL_OK)
@@ -736,6 +785,7 @@ uint8_t i2s_mic_play_sweep(uint16_t start_hz, uint16_t end_hz, uint16_t duration
         detect_energy_pos1 = 0u;
     }
 
+    i2s_bus_mode_idle();
     return ok;
 }
 
@@ -767,6 +817,7 @@ uint8_t i2s_mic_play_volume_steps(const uint8_t *levels_percent, uint8_t count)
     }
 
     i2s_speaker_gpio_init();
+    i2s_bus_mode_play();
     (void)HAL_I2S_DeInit(&hi2s2);
 
     if (i2s_config_master_tx(I2S_AUDIOFREQ_16K) != HAL_OK)
@@ -866,6 +917,7 @@ uint8_t i2s_mic_play_volume_steps(const uint8_t *levels_percent, uint8_t count)
         detect_energy_pos1 = 0u;
     }
 
+    i2s_bus_mode_idle();
     return ok;
 }
 
