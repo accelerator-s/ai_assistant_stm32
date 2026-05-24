@@ -25,6 +25,11 @@ HEARTBEAT_TIMEOUT = 45
 # recv 超时（秒）：用于周期性检查心跳是否过期
 RECV_TIMEOUT = 10
 
+# Keep each downlink text frame below the STM32 line buffer (160 bytes) and
+# display message buffer (128 bytes). The payload is GBK-encoded before send.
+DEVICE_TEXT_FRAME_BYTES = 96
+DEVICE_TEXT_FRAME_GAP_SEC = 0.02
+
 
 class DeviceConnection:
     """单个设备 TCP 连接"""
@@ -217,10 +222,13 @@ class DeviceManager:
             "send_fail_removed": len(send_fail_keys),
         }
 
-    def send_command(self, command: str) -> bool:
+    def send_command(
+        self, command: str, client: DeviceConnection | None = None
+    ) -> bool:
         """向当前活跃设备发送一条命令（自动补换行，非阻塞入队）。"""
-        client = self._get_primary_client()
+        client = client or self._get_primary_client()
         if not client:
+            logger.warning("设备下发失败: no active client, command=%r", command[:48])
             return False
 
         payload = command if command.endswith("\n") else f"{command}\n"
@@ -228,9 +236,17 @@ class DeviceManager:
             # The STM32 LCD renderer indexes a GB2312/GBK font from external flash.
             # Keep ASCII protocol prefixes unchanged, but encode Chinese payloads as
             # GBK so the firmware does not interpret UTF-8 byte triples as GBK pairs.
-            client.send_queue.put_nowait(payload.encode("gbk", errors="replace"))
+            encoded = payload.encode("gbk", errors="replace")
+            client.send_queue.put_nowait(encoded)
+            logger.info(
+                "设备下发入队: %s bytes=%d command=%r",
+                client,
+                len(encoded),
+                command[:48],
+            )
             return True
         except Exception:
+            logger.exception("设备下发入队失败: %s command=%r", client, command[:48])
             self._remove_client(client)
             return False
 
@@ -251,7 +267,33 @@ class DeviceManager:
             self._remove_client(client)
             return False
 
-    def send_text_to_device(self, text: str, role: str = "assistant") -> bool:
+    @staticmethod
+    def _split_device_text(
+        text: str, max_bytes: int = DEVICE_TEXT_FRAME_BYTES
+    ) -> list[str]:
+        chunks: list[str] = []
+        current: list[str] = []
+        current_len = 0
+
+        for ch in text:
+            encoded_len = len(ch.encode("gbk", errors="replace"))
+            if current and current_len + encoded_len > max_bytes:
+                chunks.append("".join(current))
+                current = []
+                current_len = 0
+            current.append(ch)
+            current_len += encoded_len
+
+        if current:
+            chunks.append("".join(current))
+        return chunks
+
+    def send_text_to_device(
+        self,
+        text: str,
+        role: str = "assistant",
+        client: DeviceConnection | None = None,
+    ) -> bool:
         """下发文本到设备显示。
 
         协议约定：
@@ -277,7 +319,18 @@ class DeviceManager:
         else:
             prefix = "SYS:"
 
-        return self.send_command(f"{prefix}{normalized}")
+        chunks = (
+            self._split_device_text(normalized)
+            if role == "assistant" or prefix == "SYS:"
+            else [normalized]
+        )
+
+        ok = True
+        for idx, chunk in enumerate(chunks):
+            ok = self.send_command(f"{prefix}{chunk}", client=client) and ok
+            if idx + 1 < len(chunks):
+                time.sleep(DEVICE_TEXT_FRAME_GAP_SEC)
+        return ok
 
     def wait_response(
         self, command: str, expected: str, timeout: float = 3.0
@@ -391,6 +444,7 @@ class DeviceManager:
                 self.send_text_to_device(
                     text,
                     role="user_final" if is_final else "user_partial",
+                    client=device,
                 )
 
             session = TencentStreamingAsrSession(
@@ -404,11 +458,11 @@ class DeviceManager:
             else:
                 device.audio_asr_session = None
                 if session.error:
-                    self.send_text_to_device(session.error, role="system")
+                    self.send_text_to_device(session.error, role="system", client=device)
         except Exception:
             device.audio_asr_session = None
             logger.exception("启动腾讯云实时 ASR 失败")
-            self.send_text_to_device("启动腾讯云实时识别失败", role="system")
+            self.send_text_to_device("启动腾讯云实时识别失败", role="system", client=device)
 
     def _append_audio_bytes(self, device: DeviceConnection, payload: bytes) -> None:
         if not device.audio_capture_active:
@@ -503,7 +557,7 @@ class DeviceManager:
     ) -> None:
         audio_path = str(audio_info.get("path") or "")
         if not audio_path:
-            self.send_text_to_device("录音文件路径无效", role="system")
+            self.send_text_to_device("录音文件路径无效", role="system", client=device)
             return
 
         try:
@@ -515,7 +569,11 @@ class DeviceManager:
             config = app_state.get("config")
             provider = (config.get("speech.provider", "") if config else "").lower()
             if not asr_session and provider in {"tencent", "tencent_asr"}:
-                self.send_text_to_device("腾讯云实时识别会话未建立，请检查 AppID/网络/密钥配置", role="system")
+                self.send_text_to_device(
+                    "腾讯云实时识别会话未建立，请检查 AppID/网络/密钥配置",
+                    role="system",
+                    client=device,
+                )
                 return
 
             if asr_session:
@@ -524,7 +582,7 @@ class DeviceManager:
                 recognized_text = (recognize_audio(audio_path) or "").strip()
 
             if not recognized_text:
-                self.send_text_to_device("未识别到有效语音", role="system")
+                self.send_text_to_device("未识别到有效语音", role="system", client=device)
                 return
 
             error_prefixes = (
@@ -536,13 +594,13 @@ class DeviceManager:
                 "不支持的语音识别服务商",
             )
             if recognized_text.startswith(error_prefixes):
-                self.send_text_to_device(recognized_text, role="system")
+                self.send_text_to_device(recognized_text, role="system", client=device)
                 return
 
             if asr_session and recognized_text != getattr(asr_session, "last_emitted_text", ""):
-                self.send_text_to_device(recognized_text, role="user_final")
+                self.send_text_to_device(recognized_text, role="user_final", client=device)
             elif not asr_session:
-                self.send_text_to_device(recognized_text, role="user")
+                self.send_text_to_device(recognized_text, role="user", client=device)
 
             db = app_state.get("db")
             session_id = f"device_{device.addr[0].replace('.', '_')}"
@@ -553,15 +611,15 @@ class DeviceManager:
 
             reply_text = (get_llm_reply(session_id, recognized_text) or "").strip()
             if not reply_text:
-                self.send_text_to_device("大模型未返回有效回复", role="system")
+                self.send_text_to_device("大模型未返回有效回复", role="system", client=device)
                 return
 
             if db:
                 db.add_message(session_id, "assistant", reply_text)
-            self.send_text_to_device(reply_text, role="assistant")
+            self.send_text_to_device(reply_text, role="assistant", client=device)
         except Exception:
             logger.exception("处理设备录音对话失败")
-            self.send_text_to_device("云端处理录音失败", role="system")
+            self.send_text_to_device("云端处理录音失败", role="system", client=device)
 
     def _handle_text_line(self, device: DeviceConnection, text: str) -> None:
         if text == "HB":
@@ -703,6 +761,8 @@ class DeviceManager:
     @staticmethod
     def _enable_tcp_keepalive(conn: socket.socket) -> None:
         """启用 TCP 内核级 keepalive，加速死连接检测"""
+        if hasattr(socket, "TCP_NODELAY"):
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         if hasattr(socket, "TCP_KEEPIDLE"):
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 10)
@@ -820,6 +880,7 @@ class DeviceManager:
 
             try:
                 device.conn.sendall(payload)
+                logger.info("设备下发完成: %s bytes=%d", key, len(payload))
             except Exception:
                 logger.warning(f"设备 {key} 异步发送失败，关闭连接")
                 self._remove_client(device)

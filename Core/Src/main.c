@@ -163,6 +163,23 @@ static uint16_t audio_buffer_available(void)
     return ring_distance(read_pos, write_pos, AUDIO_UPLOAD_BUFFER_SAMPLES);
 }
 
+static uint8_t tcp_idle_for_heartbeat(void)
+{
+    if (sys_state == STATE_RECORDING || mic_rec_test_state == MIC_REC_TEST_RUNNING)
+        return 0u;
+
+    if (rec_end_pending || mic_rec_done_pending)
+        return 0u;
+
+    if (audio_buffer_available() > 0u)
+        return 0u;
+
+    if (esp8266_tx_in_progress() || !esp8266_tx_queue_is_empty())
+        return 0u;
+
+    return 1u;
+}
+
 static int16_t audio_upload_apply_gain(int16_t sample)
 {
     int32_t amplified = ((int32_t)sample * (int32_t)AUDIO_UPLOAD_GAIN_Q8) >> 8;
@@ -1074,6 +1091,7 @@ int main(void)
         }
 
         if (wifi_st == ESP8266_STATUS_TCP_CONNECTED &&
+            tcp_idle_for_heartbeat() &&
             ((HAL_GetTick() - last_hb_tick) >= HEARTBEAT_INTERVAL_MS))
         {
             esp8266_tcp_send_heartbeat();

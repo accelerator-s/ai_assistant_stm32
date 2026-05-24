@@ -49,6 +49,9 @@ static uint16_t s_uart_tx_len = 0u;
 /* 线性应答缓冲区，用于解析 AT 响应 */
 static char resp_buf[ESP8266_RX_BUF_SIZE];
 static uint16_t s_tcp_parse_offset;
+static uint16_t s_ipd_payload_offset;
+static uint16_t s_ipd_payload_len;
+static uint16_t s_ipd_payload_pos;
 
 /* 模块对外状态 */
 static esp8266_status_t s_status = ESP8266_STATUS_IDLE;
@@ -210,9 +213,110 @@ static void esp8266_clear_rx(void)
 {
     __disable_irq();
     rx_write_idx = 0;
+    rx_read_idx = 0;
     memset(rx_ring_buf, 0, sizeof(rx_ring_buf));
     s_tcp_parse_offset = 0;
+    s_ipd_payload_offset = 0;
+    s_ipd_payload_len = 0;
+    s_ipd_payload_pos = 0;
     __enable_irq();
+}
+
+static void esp8266_reset_ipd_parser(void)
+{
+    s_tcp_parse_offset = 0;
+    s_ipd_payload_offset = 0;
+    s_ipd_payload_len = 0;
+    s_ipd_payload_pos = 0;
+}
+
+static void esp8266_consume_rx(uint16_t count)
+{
+    uint16_t remaining;
+
+    if (count == 0u)
+        return;
+
+    __disable_irq();
+    if (count >= rx_write_idx)
+    {
+        rx_write_idx = 0;
+        rx_read_idx = 0;
+    }
+    else
+    {
+        remaining = (uint16_t)(rx_write_idx - count);
+        memmove(rx_ring_buf, rx_ring_buf + count, remaining);
+        rx_write_idx = remaining;
+        rx_read_idx = 0;
+    }
+    memset(rx_ring_buf + rx_write_idx, 0, sizeof(rx_ring_buf) - rx_write_idx);
+    __enable_irq();
+
+    esp8266_reset_ipd_parser();
+}
+
+static void esp8266_clear_at_resp_keep_ipd(void)
+{
+    static const uint8_t ipd_prefix[] = {'+', 'I', 'P', 'D', ','};
+    uint16_t i;
+    uint16_t ipd_pos = ESP8266_RX_BUF_SIZE;
+    uint16_t partial_pos = ESP8266_RX_BUF_SIZE;
+    uint16_t len;
+
+    __disable_irq();
+    len = rx_write_idx;
+    for (i = 0; (i + sizeof(ipd_prefix)) <= len; i++)
+    {
+        if (memcmp(rx_ring_buf + i, ipd_prefix, sizeof(ipd_prefix)) == 0)
+        {
+            ipd_pos = i;
+            break;
+        }
+    }
+
+    if (ipd_pos >= len)
+    {
+        uint16_t max_partial = (len < (sizeof(ipd_prefix) - 1u))
+                                   ? len
+                                   : (uint16_t)(sizeof(ipd_prefix) - 1u);
+        uint16_t partial_len;
+
+        for (partial_len = max_partial; partial_len > 0u; partial_len--)
+        {
+            if (memcmp(rx_ring_buf + len - partial_len, ipd_prefix, partial_len) == 0)
+            {
+                partial_pos = (uint16_t)(len - partial_len);
+                break;
+            }
+        }
+    }
+
+    if (ipd_pos < len)
+    {
+        uint16_t keep_len = (uint16_t)(len - ipd_pos);
+        memmove(rx_ring_buf, rx_ring_buf + ipd_pos, keep_len);
+        rx_write_idx = keep_len;
+        rx_read_idx = 0;
+        memset(rx_ring_buf + rx_write_idx, 0, sizeof(rx_ring_buf) - rx_write_idx);
+    }
+    else if (partial_pos < len)
+    {
+        uint16_t keep_len = (uint16_t)(len - partial_pos);
+        memmove(rx_ring_buf, rx_ring_buf + partial_pos, keep_len);
+        rx_write_idx = keep_len;
+        rx_read_idx = 0;
+        memset(rx_ring_buf + rx_write_idx, 0, sizeof(rx_ring_buf) - rx_write_idx);
+    }
+    else
+    {
+        rx_write_idx = 0;
+        rx_read_idx = 0;
+        memset(rx_ring_buf, 0, sizeof(rx_ring_buf));
+    }
+    __enable_irq();
+
+    esp8266_reset_ipd_parser();
 }
 
 static uint16_t esp8266_snapshot_resp(void)
@@ -288,6 +392,34 @@ static int esp8266_send_cmd_now(const char *cmd)
         return 0;
 
     esp8266_clear_rx();
+    n = snprintf((char *)s_uart_tx_buf, sizeof(s_uart_tx_buf), "%s\r\n", cmd);
+    if (n <= 0 || (uint16_t)n >= sizeof(s_uart_tx_buf))
+        return 0;
+
+    s_uart_tx_len = (uint16_t)n;
+    s_uart_tx_busy = 1u;
+
+    if (HAL_UART_Transmit_IT(&huart_esp8266, s_uart_tx_buf, s_uart_tx_len) != HAL_OK)
+    {
+        s_uart_tx_busy = 0u;
+        s_uart_tx_len = 0u;
+        return 0;
+    }
+
+    return 1;
+}
+
+static int esp8266_send_cmd_keep_ipd_now(const char *cmd)
+{
+    int n;
+
+    if (!cmd)
+        return 0;
+
+    if (!esp8266_uart_tx_ready())
+        return 0;
+
+    esp8266_clear_at_resp_keep_ipd();
     n = snprintf((char *)s_uart_tx_buf, sizeof(s_uart_tx_buf), "%s\r\n", cmd);
     if (n <= 0 || (uint16_t)n >= sizeof(s_uart_tx_buf))
         return 0;
@@ -748,7 +880,7 @@ static void tcp_poll(void)
 
     case TCP_PHASE_HB_CIPSEND:
         if (s_tx_phase == TX_ENGINE_IDLE &&
-            esp8266_send_cmd_now("AT+CIPSEND=3"))
+            esp8266_send_cmd_keep_ipd_now("AT+CIPSEND=3"))
         {
             esp8266_set_tcp_phase(TCP_PHASE_HB_PROMPT_WAIT);
         }
@@ -773,7 +905,7 @@ static void tcp_poll(void)
     case TCP_PHASE_HB_DATA:
         if (esp8266_uart_tx_ready())
         {
-            esp8266_clear_rx();
+            esp8266_clear_at_resp_keep_ipd();
             if (esp8266_send_raw_str("HB\n"))
             {
                 esp8266_set_tcp_phase(TCP_PHASE_HB_ACK_WAIT);
@@ -785,7 +917,7 @@ static void tcp_poll(void)
         esp8266_snapshot_resp();
         if (strstr(resp_buf, "SEND OK") != NULL)
         {
-            esp8266_clear_rx();
+            esp8266_clear_at_resp_keep_ipd();
             esp8266_set_tcp_phase(TCP_PHASE_DONE_OK);
         }
         else if (strstr(resp_buf, "ERROR") != NULL ||
@@ -848,7 +980,7 @@ static void tx_engine_start_next(void)
 
         format_tx_item_payload(&s_tx_current, payload, &payload_len);
         snprintf(cmd, sizeof(cmd), "AT+CIPSEND=%u", payload_len);
-        if (esp8266_send_cmd_now(cmd))
+        if (esp8266_send_cmd_keep_ipd_now(cmd))
         {
             esp8266_set_tx_phase(TX_ENGINE_PROMPT_WAIT);
         }
@@ -881,7 +1013,7 @@ static void tx_engine_finish_current(int success, const char *dbg)
     memset(&s_tx_current, 0, sizeof(s_tx_current));
     s_tx_has_current = 0u;
     esp8266_set_tx_phase(TX_ENGINE_IDLE);
-    esp8266_clear_rx();
+    esp8266_clear_at_resp_keep_ipd();
 }
 
 static void tx_engine_poll(void)
@@ -922,7 +1054,7 @@ static void tx_engine_poll(void)
             format_tx_item_payload(&s_tx_current, payload, &payload_len);
             if (esp8266_uart_tx_ready())
             {
-                esp8266_clear_rx();
+                esp8266_clear_at_resp_keep_ipd();
                 if (esp8266_send_raw_buf(payload, payload_len))
                 {
                     esp8266_set_tx_phase(TX_ENGINE_ACK_WAIT);
@@ -1355,76 +1487,124 @@ int esp8266_tcp_read_line(char *out, uint16_t out_size)
     uint16_t payload_len;
     uint16_t avail;
     uint16_t line_len;
+    uint16_t line_start_pos;
+    uint16_t next_pos;
+    uint16_t consumed;
 
     if (!out || out_size < 2u)
         return 0;
 
     out[0] = '\0';
 
+    if (s_tcp_phase != TCP_PHASE_DONE_OK || s_tx_phase != TX_ENGINE_IDLE)
+        return 0;
+
     esp8266_snapshot_resp();
     buf_len = (uint16_t)strlen(resp_buf);
     if (buf_len == 0u)
     {
-        s_tcp_parse_offset = 0u;
+        esp8266_reset_ipd_parser();
         return 0;
     }
 
-    if (s_tcp_parse_offset >= buf_len)
+    while (1)
     {
-        if (buf_len > 32u)
-            s_tcp_parse_offset = (uint16_t)(buf_len - 32u);
-        else
-            s_tcp_parse_offset = 0u;
+        if (s_ipd_payload_len > 0u)
+        {
+            if ((uint32_t)s_ipd_payload_offset + (uint32_t)s_ipd_payload_len > (uint32_t)buf_len)
+                return 0;
+
+            payload = resp_buf + s_ipd_payload_offset;
+            if (s_ipd_payload_pos >= s_ipd_payload_len)
+            {
+                consumed = (uint16_t)(s_ipd_payload_offset + s_ipd_payload_len);
+                esp8266_consume_rx(consumed);
+                return 0;
+            }
+
+            avail = (uint16_t)(s_ipd_payload_len - s_ipd_payload_pos);
+            line_end = (char *)memchr(payload + s_ipd_payload_pos, '\n', avail);
+            if (!line_end)
+            {
+                consumed = (uint16_t)(s_ipd_payload_offset + s_ipd_payload_len);
+                esp8266_consume_rx(consumed);
+                return 0;
+            }
+
+            line_start_pos = s_ipd_payload_pos;
+            line_len = (uint16_t)(line_end - (payload + line_start_pos));
+            next_pos = (uint16_t)((line_end - payload) + 1u);
+
+            if (line_len > 0u && payload[line_start_pos + line_len - 1u] == '\r')
+                line_len--;
+
+            s_ipd_payload_pos = next_pos;
+
+            if (line_len == 0u)
+            {
+                if (s_ipd_payload_pos >= s_ipd_payload_len)
+                {
+                    consumed = (uint16_t)(s_ipd_payload_offset + s_ipd_payload_len);
+                    esp8266_consume_rx(consumed);
+                    return 0;
+                }
+                continue;
+            }
+
+            if (line_len >= out_size)
+                line_len = (uint16_t)(out_size - 1u);
+
+            memcpy(out, payload + line_start_pos, line_len);
+            out[line_len] = '\0';
+
+            if (s_ipd_payload_pos >= s_ipd_payload_len)
+            {
+                consumed = (uint16_t)(s_ipd_payload_offset + s_ipd_payload_len);
+                esp8266_consume_rx(consumed);
+            }
+            return 1;
+        }
+
+        if (s_tcp_parse_offset >= buf_len)
+        {
+            if (buf_len > 32u)
+                s_tcp_parse_offset = (uint16_t)(buf_len - 32u);
+            else
+                s_tcp_parse_offset = 0u;
+        }
+
+        base = resp_buf + s_tcp_parse_offset;
+        ipd = strstr(base, "+IPD,");
+        if (!ipd)
+            return 0;
+
+        comma = strchr(ipd, ',');
+        colon = strchr(ipd, ':');
+        if (!comma || !colon || colon <= comma)
+            return 0;
+
+        len_start = comma + 1;
+        next_comma = strchr(len_start, ',');
+        if (next_comma && next_comma < colon)
+        {
+            len_start = next_comma + 1;
+        }
+
+        payload_len = (uint16_t)atoi(len_start);
+        payload = colon + 1;
+        avail = (uint16_t)(resp_buf + buf_len - payload);
+        if (payload_len == 0u)
+        {
+            s_tcp_parse_offset = (uint16_t)(payload - resp_buf);
+            continue;
+        }
+        if (avail < payload_len)
+            return 0;
+
+        s_ipd_payload_offset = (uint16_t)(payload - resp_buf);
+        s_ipd_payload_len = payload_len;
+        s_ipd_payload_pos = 0u;
     }
-
-    base = resp_buf + s_tcp_parse_offset;
-    ipd = strstr(base, "+IPD,");
-    if (!ipd)
-        return 0;
-
-    comma = strchr(ipd, ',');
-    colon = strchr(ipd, ':');
-    if (!comma || !colon || colon <= comma)
-        return 0;
-
-    len_start = comma + 1;
-    next_comma = strchr(len_start, ',');
-    if (next_comma && next_comma < colon)
-    {
-        len_start = next_comma + 1;
-    }
-
-    payload_len = (uint16_t)atoi(len_start);
-    payload = colon + 1;
-    avail = (uint16_t)(resp_buf + buf_len - payload);
-    if (avail < payload_len)
-        return 0;
-
-    line_end = (char *)memchr(payload, '\n', payload_len);
-    if (!line_end)
-    {
-        s_tcp_parse_offset = (uint16_t)((payload - resp_buf) + payload_len);
-        return 0;
-    }
-
-    line_len = (uint16_t)(line_end - payload);
-    if (line_len > 0u && payload[line_len - 1u] == '\r')
-        line_len--;
-
-    if (line_len == 0u)
-    {
-        s_tcp_parse_offset = (uint16_t)((payload - resp_buf) + payload_len);
-        return 0;
-    }
-
-    if (line_len >= out_size)
-        line_len = (uint16_t)(out_size - 1u);
-
-    memcpy(out, payload, line_len);
-    out[line_len] = '\0';
-
-    s_tcp_parse_offset = (uint16_t)((payload - resp_buf) + payload_len);
-    return 1;
 }
 
 /* ==================== 中断服务 ==================== */
