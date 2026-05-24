@@ -84,6 +84,9 @@ const api = {
   testLLM(params) {
     return http.post("/test/llm", params).then((r) => r.data);
   },
+  testTTS(params) {
+    return http.post("/tts/test", params).then((r) => r.data);
+  },
   testMicHardware() {
     return http.post("/test/mic/hardware").then((r) => r.data);
   },

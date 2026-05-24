@@ -9,6 +9,7 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 data/audio/
+data/tts/
 
 # Local config
 config/default_config.json

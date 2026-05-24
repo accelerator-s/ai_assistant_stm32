@@ -25,11 +25,9 @@
     "temperature": 0.7
   },
   "tts": {
-    "provider": "openai_tts",
-    "base_url": "",
-    "api_key": "",
-    "model": "tts-1",
-    "voice": "alloy"
+    "azure_region": "",
+    "azure_key": "",
+    "azure_voice": "zh-CN-XiaoxiaoNeural"
   },
   "advanced": {
     "service_port": 5000,
