@@ -108,6 +108,11 @@ I2S_HandleTypeDef *i2s_mic_get_handle(void);
 DMA_HandleTypeDef *i2s_mic_get_dma_handle(void);
 
 /**
+ * Get the I2S2 TX DMA handle used for streamed speaker playback.
+ */
+DMA_HandleTypeDef *i2s_mic_get_tx_dma_handle(void);
+
+/**
  * 硬件连接检测: 短暂启动 I2S 采集，检查是否读到非零数据
  * @return 1=检测到麦克风数据, 0=未检测到
  */
@@ -136,8 +141,8 @@ uint8_t i2s_mic_play_volume_steps(const uint8_t *levels_percent, uint8_t count);
 
 /**
  * Play a short Ode to Joy melody on I2S2/MAX98357A.
- * The melody is generated in small PCM chunks so STM32F103VET6 RAM is not
- * consumed by a full-song buffer.
+ * The melody is generated on the fly and streamed through a DMA double buffer,
+ * so playback stays continuous without allocating a full-song PCM buffer.
  * @return 1=played successfully, 0=I2S transmit failed
  */
 uint8_t i2s_mic_play_ode_to_joy(void);

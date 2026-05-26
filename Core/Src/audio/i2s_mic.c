@@ -10,6 +10,7 @@
 /* I2S 和 DMA 句柄 */
 static I2S_HandleTypeDef hi2s2;
 static DMA_HandleTypeDef hdma_i2s2_rx;
+static DMA_HandleTypeDef hdma_i2s2_tx;
 
 /* DMA 双缓冲区 */
 static uint16_t i2s_dma_buf[I2S_DMA_BUF_SIZE];
@@ -173,6 +174,46 @@ static const int16_t sine_lut_32[32] = {
     -32767, -32137, -30273, -27245, -23170, -18204, -12539, -6393
 };
 
+typedef struct
+{
+    uint16_t frequency_hz;
+    uint16_t duration_ms;
+} melody_note_t;
+
+typedef struct
+{
+    const melody_note_t *melody;
+    uint16_t note_count;
+    uint16_t amplitude;
+    uint32_t total_melody_frames;
+    uint32_t total_frames;
+    uint32_t fade_frames;
+    uint32_t frame_cursor;
+    uint32_t note_frame_end;
+    uint32_t phase_acc;
+    uint32_t phase_step;
+    int32_t filter_state;
+    uint16_t note_index;
+    uint8_t in_end_silence;
+    uint8_t half_has_signal[2];
+    volatile uint8_t active;
+    volatile uint8_t finished;
+    volatile uint8_t error;
+} i2s_melody_dma_player_t;
+
+enum
+{
+    I2S_MELODY_SAMPLE_RATE = 16000u,
+    I2S_MELODY_DMA_HALF_FRAMES = 256u,
+    I2S_MELODY_DMA_BUFFER_WORDS = I2S_MELODY_DMA_HALF_FRAMES * 4u,
+    I2S_MELODY_PCM_FILTER_ALPHA_Q8 = 112u,
+    I2S_MELODY_TIMEOUT_MARGIN_MS = 1000u
+};
+
+/* Streamed speaker playback uses a dedicated TX DMA ping-pong buffer. */
+static uint16_t i2s_melody_dma_buf[I2S_MELODY_DMA_BUFFER_WORDS];
+static i2s_melody_dma_player_t i2s_melody_player;
+
 static int16_t sine_sample_interp(uint32_t phase_acc)
 {
     enum
@@ -192,111 +233,235 @@ static int16_t sine_sample_interp(uint32_t phase_acc)
                                 SINE_PHASE_FRAC_BITS));
 }
 
-static uint8_t i2s_play_pcm_note(uint16_t frequency_hz,
-                                 uint16_t duration_ms,
-                                 uint16_t amplitude)
+static uint32_t i2s_note_phase_step(uint16_t frequency_hz, uint32_t sample_rate)
 {
     enum
     {
-        PLAY_SAMPLE_RATE = 16000u,
-        PLAY_FRAMES_PER_CHUNK = 512u,
         SINE_TABLE_SIZE = 32u,
-        SINE_PHASE_FRAC_BITS = 16u,
-        NOTE_FADE_FRAMES = PLAY_SAMPLE_RATE / 200u,
-        PCM_FILTER_ALPHA_Q8 = 112u
+        SINE_PHASE_FRAC_BITS = 16u
     };
+    uint32_t phase_step;
 
-    uint16_t tx_buf[PLAY_FRAMES_PER_CHUNK * 2u];
-    uint32_t total_frames;
-    uint32_t frames_sent = 0u;
-    uint32_t phase_acc = 0u;
-    uint32_t phase_step = 0u;
-    uint32_t fade_frames;
-    int32_t filter_state = 0;
+    if (frequency_hz == 0u)
+        return 0u;
+    if (frequency_hz < 20u)
+        frequency_hz = 20u;
+    if (frequency_hz > 4000u)
+        frequency_hz = 4000u;
 
-    if (duration_ms == 0u)
-        return 1u;
+    phase_step = (uint32_t)(((uint64_t)frequency_hz *
+                             SINE_TABLE_SIZE *
+                             (1ULL << SINE_PHASE_FRAC_BITS)) /
+                            sample_rate);
+    if (phase_step == 0u)
+        phase_step = 1u;
 
-    if (frequency_hz > 0u)
+    return phase_step;
+}
+
+static uint8_t i2s_fill_melody_tx_half(uint16_t *dst, uint16_t frames)
+{
+    uint8_t half_has_signal = 0u;
+
+    for (uint16_t i = 0u; i < frames; i++)
     {
-        if (frequency_hz < 20u)
-            frequency_hz = 20u;
-        if (frequency_hz > 4000u)
-            frequency_hz = 4000u;
+        uint32_t timeline_frame = i2s_melody_player.frame_cursor;
+        int16_t waveform_sample = 0;
+        int16_t sample;
 
-        phase_step = (uint32_t)(((uint64_t)frequency_hz *
-                                 SINE_TABLE_SIZE *
-                                 (1ULL << SINE_PHASE_FRAC_BITS)) /
-                                PLAY_SAMPLE_RATE);
-        if (phase_step == 0u)
-            phase_step = 1u;
-    }
-
-    total_frames = ((uint32_t)duration_ms * PLAY_SAMPLE_RATE) / 1000u;
-    if (total_frames == 0u)
-        total_frames = 1u;
-
-    fade_frames = NOTE_FADE_FRAMES;
-    if (fade_frames > (total_frames / 10u))
-        fade_frames = total_frames / 10u;
-    if ((fade_frames * 2u) > total_frames)
-        fade_frames = total_frames / 2u;
-
-    while (frames_sent < total_frames)
-    {
-        uint16_t frames_this_chunk = PLAY_FRAMES_PER_CHUNK;
-        uint16_t i;
-
-        if ((total_frames - frames_sent) < frames_this_chunk)
+        if (timeline_frame < i2s_melody_player.total_frames)
         {
-            frames_this_chunk = (uint16_t)(total_frames - frames_sent);
-        }
-
-        for (i = 0u; i < frames_this_chunk; i++)
-        {
-            int16_t sample = 0;
-
-            if (frequency_hz > 0u)
+            while (!i2s_melody_player.in_end_silence &&
+                   timeline_frame >= i2s_melody_player.note_frame_end)
             {
-                uint32_t frame_index = frames_sent + i;
-                uint32_t envelope = 32767u;
-                sample = (int16_t)(((int32_t)sine_sample_interp(phase_acc) *
-                                    (int32_t)amplitude) / 32767);
-                if (fade_frames > 0u)
+                uint32_t note_frames;
+
+                i2s_melody_player.note_index++;
+                if (i2s_melody_player.note_index >= i2s_melody_player.note_count)
                 {
-                    if (frame_index < fade_frames)
-                    {
-                        envelope = (frame_index * 32767u) / fade_frames;
-                    }
-                    else if (frame_index >= (total_frames - fade_frames))
-                    {
-                        envelope = ((total_frames - frame_index) * 32767u) /
-                                   fade_frames;
-                    }
+                    i2s_melody_player.in_end_silence = 1u;
+                    i2s_melody_player.phase_step = 0u;
+                    break;
                 }
-                sample = (int16_t)(((int32_t)sample * (int32_t)envelope) /
-                                   32767);
-                filter_state += (((int32_t)sample - filter_state) *
-                                 PCM_FILTER_ALPHA_Q8) >> 8;
-                sample = (int16_t)filter_state;
-                phase_acc += phase_step;
+
+                note_frames = ((uint32_t)i2s_melody_player.melody[i2s_melody_player.note_index].duration_ms *
+                               I2S_MELODY_SAMPLE_RATE) / 1000u;
+                if (note_frames == 0u)
+                    note_frames = 1u;
+
+                i2s_melody_player.note_frame_end += note_frames;
+                i2s_melody_player.phase_step =
+                    i2s_note_phase_step(i2s_melody_player.melody[i2s_melody_player.note_index].frequency_hz,
+                                        I2S_MELODY_SAMPLE_RATE);
             }
 
-            tx_buf[i * 2u] = (uint16_t)sample;
-            tx_buf[i * 2u + 1u] = (uint16_t)sample;
+            if (i2s_melody_player.fade_frames > 0u)
+            {
+                uint32_t envelope = 32767u;
+
+                if (timeline_frame < i2s_melody_player.fade_frames)
+                {
+                    envelope = (timeline_frame * 32767u) /
+                               i2s_melody_player.fade_frames;
+                }
+                else if (timeline_frame >=
+                         (i2s_melody_player.total_melody_frames -
+                          i2s_melody_player.fade_frames) &&
+                         timeline_frame < i2s_melody_player.total_melody_frames)
+                {
+                    envelope =
+                        ((i2s_melody_player.total_melody_frames - timeline_frame) *
+                         32767u) / i2s_melody_player.fade_frames;
+                }
+
+                if (i2s_melody_player.phase_step > 0u &&
+                    !i2s_melody_player.in_end_silence)
+                {
+                    waveform_sample =
+                        (int16_t)(((int32_t)sine_sample_interp(i2s_melody_player.phase_acc) *
+                                   (int32_t)i2s_melody_player.amplitude) / 32767);
+                    waveform_sample =
+                        (int16_t)(((int32_t)waveform_sample * (int32_t)envelope) /
+                                   32767);
+                    i2s_melody_player.phase_acc += i2s_melody_player.phase_step;
+                }
+            }
+            else if (i2s_melody_player.phase_step > 0u &&
+                     !i2s_melody_player.in_end_silence)
+            {
+                waveform_sample =
+                    (int16_t)(((int32_t)sine_sample_interp(i2s_melody_player.phase_acc) *
+                               (int32_t)i2s_melody_player.amplitude) / 32767);
+                i2s_melody_player.phase_acc += i2s_melody_player.phase_step;
+            }
+        }
+        else
+        {
+            i2s_melody_player.in_end_silence = 1u;
+            i2s_melody_player.phase_step = 0u;
         }
 
-        if (HAL_I2S_Transmit(&hi2s2, tx_buf,
-                             (uint16_t)(frames_this_chunk * 2u),
-                             200u) != HAL_OK)
+        i2s_melody_player.filter_state +=
+            (((int32_t)waveform_sample - i2s_melody_player.filter_state) *
+             I2S_MELODY_PCM_FILTER_ALPHA_Q8) >> 8;
+        sample = (int16_t)i2s_melody_player.filter_state;
+        if (sample != 0)
         {
+            half_has_signal = 1u;
+        }
+
+        dst[i * 2u] = (uint16_t)sample;
+        dst[i * 2u + 1u] = (uint16_t)sample;
+        i2s_melody_player.frame_cursor++;
+    }
+
+    return half_has_signal;
+}
+
+static uint8_t i2s_play_pcm_melody(const melody_note_t *melody,
+                                   uint16_t note_count,
+                                   uint16_t amplitude,
+                                   uint16_t end_silence_ms)
+{
+    uint32_t timeout_ms;
+    uint32_t start_tick;
+    uint16_t i;
+
+    if (!melody || note_count == 0u)
+        return 0u;
+
+    memset(&i2s_melody_player, 0, sizeof(i2s_melody_player));
+    memset(i2s_melody_dma_buf, 0, sizeof(i2s_melody_dma_buf));
+
+    i2s_melody_player.melody = melody;
+    i2s_melody_player.note_count = note_count;
+    i2s_melody_player.amplitude = amplitude;
+
+    for (i = 0u; i < note_count; i++)
+    {
+        uint32_t note_frames = ((uint32_t)melody[i].duration_ms *
+                                I2S_MELODY_SAMPLE_RATE) / 1000u;
+        if (note_frames == 0u)
+            note_frames = 1u;
+        i2s_melody_player.total_melody_frames += note_frames;
+    }
+
+    i2s_melody_player.total_frames =
+        i2s_melody_player.total_melody_frames +
+        (((uint32_t)end_silence_ms * I2S_MELODY_SAMPLE_RATE) / 1000u);
+    i2s_melody_player.fade_frames = I2S_MELODY_SAMPLE_RATE / 125u;
+    if (i2s_melody_player.fade_frames >
+        (i2s_melody_player.total_melody_frames / 2u))
+    {
+        i2s_melody_player.fade_frames =
+            i2s_melody_player.total_melody_frames / 2u;
+    }
+
+    i2s_melody_player.note_frame_end =
+        ((uint32_t)melody[0].duration_ms * I2S_MELODY_SAMPLE_RATE) / 1000u;
+    if (i2s_melody_player.note_frame_end == 0u)
+        i2s_melody_player.note_frame_end = 1u;
+    i2s_melody_player.phase_step =
+        i2s_note_phase_step(melody[0].frequency_hz, I2S_MELODY_SAMPLE_RATE);
+
+    i2s_melody_player.half_has_signal[0] =
+        i2s_fill_melody_tx_half(&i2s_melody_dma_buf[0],
+                                I2S_MELODY_DMA_HALF_FRAMES);
+    i2s_melody_player.half_has_signal[1] =
+        i2s_fill_melody_tx_half(&i2s_melody_dma_buf[I2S_MELODY_DMA_HALF_FRAMES * 2u],
+                                I2S_MELODY_DMA_HALF_FRAMES);
+
+    __HAL_RCC_DMA1_CLK_ENABLE();
+    hdma_i2s2_tx.Instance = DMA1_Channel5;
+    hdma_i2s2_tx.Init.Direction = DMA_MEMORY_TO_PERIPH;
+    hdma_i2s2_tx.Init.PeriphInc = DMA_PINC_DISABLE;
+    hdma_i2s2_tx.Init.MemInc = DMA_MINC_ENABLE;
+    hdma_i2s2_tx.Init.PeriphDataAlignment = DMA_PDATAALIGN_HALFWORD;
+    hdma_i2s2_tx.Init.MemDataAlignment = DMA_MDATAALIGN_HALFWORD;
+    hdma_i2s2_tx.Init.Mode = DMA_CIRCULAR;
+    hdma_i2s2_tx.Init.Priority = DMA_PRIORITY_HIGH;
+    if (HAL_DMA_Init(&hdma_i2s2_tx) != HAL_OK)
+    {
+        return 0u;
+    }
+
+    __HAL_LINKDMA(&hi2s2, hdmatx, hdma_i2s2_tx);
+    HAL_NVIC_SetPriority(DMA1_Channel5_IRQn, 1, 0);
+    HAL_NVIC_EnableIRQ(DMA1_Channel5_IRQn);
+
+    i2s_melody_player.active = 1u;
+    if (HAL_I2S_Transmit_DMA(&hi2s2,
+                             i2s_melody_dma_buf,
+                             I2S_MELODY_DMA_BUFFER_WORDS) != HAL_OK)
+    {
+        i2s_melody_player.active = 0u;
+        return 0u;
+    }
+
+    timeout_ms = (i2s_melody_player.total_frames * 1000u) /
+                 I2S_MELODY_SAMPLE_RATE;
+    timeout_ms += I2S_MELODY_TIMEOUT_MARGIN_MS;
+    start_tick = HAL_GetTick();
+
+    while (!i2s_melody_player.finished)
+    {
+        if (i2s_melody_player.error)
+        {
+            i2s_melody_player.active = 0u;
+            (void)HAL_I2S_DMAStop(&hi2s2);
             return 0u;
         }
 
-        frames_sent += frames_this_chunk;
+        if ((HAL_GetTick() - start_tick) > timeout_ms)
+        {
+            i2s_melody_player.active = 0u;
+            i2s_melody_player.error = 1u;
+            (void)HAL_I2S_DMAStop(&hi2s2);
+            return 0u;
+        }
     }
 
-    return 1u;
+    return i2s_melody_player.error ? 0u : 1u;
 }
 
 /**
@@ -487,6 +652,54 @@ void HAL_I2S_RxCpltCallback(I2S_HandleTypeDef *hi2s)
 
 /* ===================== 公开接口 ===================== */
 
+static void i2s_melody_dma_service_half(uint8_t half_index)
+{
+    uint16_t *half_buf = &i2s_melody_dma_buf[half_index *
+                                             I2S_MELODY_DMA_HALF_FRAMES * 2u];
+
+    if (!i2s_melody_player.active)
+        return;
+
+    i2s_melody_player.half_has_signal[half_index] =
+        i2s_fill_melody_tx_half(half_buf, I2S_MELODY_DMA_HALF_FRAMES);
+
+    if (i2s_melody_player.frame_cursor >= i2s_melody_player.total_frames &&
+        i2s_melody_player.filter_state == 0 &&
+        !i2s_melody_player.half_has_signal[0] &&
+        !i2s_melody_player.half_has_signal[1])
+    {
+        i2s_melody_player.active = 0u;
+        i2s_melody_player.finished = 1u;
+        (void)HAL_I2S_DMAStop(&hi2s2);
+    }
+}
+
+void HAL_I2S_TxHalfCpltCallback(I2S_HandleTypeDef *hi2s)
+{
+    if (hi2s->Instance != SPI2)
+        return;
+
+    i2s_melody_dma_service_half(0u);
+}
+
+void HAL_I2S_TxCpltCallback(I2S_HandleTypeDef *hi2s)
+{
+    if (hi2s->Instance != SPI2)
+        return;
+
+    i2s_melody_dma_service_half(1u);
+}
+
+void HAL_I2S_ErrorCallback(I2S_HandleTypeDef *hi2s)
+{
+    if (hi2s->Instance != SPI2 || !i2s_melody_player.active)
+        return;
+
+    i2s_melody_player.active = 0u;
+    i2s_melody_player.error = 1u;
+    i2s_melody_player.finished = 1u;
+}
+
 void i2s_mic_init(void)
 {
     /* 使能 SPI2 外设时钟 */
@@ -608,6 +821,11 @@ I2S_HandleTypeDef *i2s_mic_get_handle(void)
 DMA_HandleTypeDef *i2s_mic_get_dma_handle(void)
 {
     return &hdma_i2s2_rx;
+}
+
+DMA_HandleTypeDef *i2s_mic_get_tx_dma_handle(void)
+{
+    return &hdma_i2s2_tx;
 }
 
 uint8_t i2s_mic_probe(void)
@@ -1002,12 +1220,6 @@ uint8_t i2s_mic_play_volume_steps(const uint8_t *levels_percent, uint8_t count)
 
 uint8_t i2s_mic_play_ode_to_joy(void)
 {
-    typedef struct
-    {
-        uint16_t frequency_hz;
-        uint16_t duration_ms;
-    } melody_note_t;
-
     enum
     {
         ODE_AMPLITUDE = 6800u,
@@ -1035,7 +1247,6 @@ uint8_t i2s_mic_play_ode_to_joy(void)
     };
 
     uint8_t ok = 1u;
-    uint16_t i;
 
     if (is_recording)
     {
@@ -1052,16 +1263,12 @@ uint8_t i2s_mic_play_ode_to_joy(void)
         ok = 0u;
     }
 
-    for (i = 0u; ok && i < (uint16_t)(sizeof(melody) / sizeof(melody[0])); i++)
-    {
-        ok = i2s_play_pcm_note(melody[i].frequency_hz,
-                               melody[i].duration_ms,
-                               ODE_AMPLITUDE);
-    }
-
     if (ok)
     {
-        ok = i2s_play_pcm_note(0u, ODE_END_SILENCE_MS, 0u);
+        ok = i2s_play_pcm_melody(melody,
+                                 (uint16_t)(sizeof(melody) / sizeof(melody[0])),
+                                 ODE_AMPLITUDE,
+                                 ODE_END_SILENCE_MS);
     }
 
     (void)HAL_I2S_DeInit(&hi2s2);

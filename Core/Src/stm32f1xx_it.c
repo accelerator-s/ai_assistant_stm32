@@ -78,10 +78,16 @@ void USART3_IRQHandler(void)
   esp8266_uart_irq_handler();
 }
 
-/* I2S2 麦克风 DMA 接收 — DMA1 通道4 */
+/* I2S2 麦克风 DMA 接收 - DMA1 通道4 */
 void DMA1_Channel4_IRQHandler(void)
 {
   HAL_DMA_IRQHandler(i2s_mic_get_dma_handle());
+}
+
+/* I2S2 扬声器 DMA 发送 - DMA1 通道5 */
+void DMA1_Channel5_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(i2s_mic_get_tx_dma_handle());
 }
 
 /* SPI2 全局中断（I2S2 共用） */
