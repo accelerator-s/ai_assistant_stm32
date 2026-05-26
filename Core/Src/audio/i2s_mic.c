@@ -207,6 +207,7 @@ enum
     I2S_MELODY_DMA_HALF_FRAMES = 256u,
     I2S_MELODY_DMA_BUFFER_WORDS = I2S_MELODY_DMA_HALF_FRAMES * 4u,
     I2S_MELODY_PCM_FILTER_ALPHA_Q8 = 112u,
+    I2S_MELODY_FILTER_SILENCE_DEADBAND = 16,
     I2S_MELODY_TIMEOUT_MARGIN_MS = 1000u
 };
 
@@ -344,6 +345,14 @@ static uint8_t i2s_fill_melody_tx_half(uint16_t *dst, uint16_t frames)
         i2s_melody_player.filter_state +=
             (((int32_t)waveform_sample - i2s_melody_player.filter_state) *
              I2S_MELODY_PCM_FILTER_ALPHA_Q8) >> 8;
+
+        if (i2s_melody_player.in_end_silence && waveform_sample == 0 &&
+            i2s_melody_player.filter_state > -I2S_MELODY_FILTER_SILENCE_DEADBAND &&
+            i2s_melody_player.filter_state < I2S_MELODY_FILTER_SILENCE_DEADBAND)
+        {
+            i2s_melody_player.filter_state = 0;
+        }
+
         sample = (int16_t)i2s_melody_player.filter_state;
         if (sample != 0)
         {
