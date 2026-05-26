@@ -47,7 +47,7 @@ export default {
                   :loading="states[item.id]?.loading"
                   @click="runCase(item)"
                 >
-                  开始测试
+                  {{ item.id === 'ode_to_joy' ? '播放欢乐颂' : '开始测试' }}
                 </el-button>
               </div>
               <div class="step-desc">{{ item.description }}</div>

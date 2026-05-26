@@ -134,4 +134,12 @@ uint8_t i2s_mic_play_sweep(uint16_t start_hz, uint16_t end_hz, uint16_t duration
  */
 uint8_t i2s_mic_play_volume_steps(const uint8_t *levels_percent, uint8_t count);
 
+/**
+ * Play a short Ode to Joy melody on I2S2/MAX98357A.
+ * The melody is generated in small PCM chunks so STM32F103VET6 RAM is not
+ * consumed by a full-song buffer.
+ * @return 1=played successfully, 0=I2S transmit failed
+ */
+uint8_t i2s_mic_play_ode_to_joy(void);
+
 #endif /* __I2S_MIC_H */

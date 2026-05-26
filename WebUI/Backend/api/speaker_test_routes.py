@@ -63,6 +63,14 @@ SPEAKER_TEST_CASES = (
         expected="SPK_VOLUME_DONE",
         timeout=8.0,
     ),
+    SpeakerTestCase(
+        case_id="ode_to_joy",
+        name="播放欢乐颂",
+        description="在 STM32F103VET6 的 I2S2/MAX98357A 链路上播放一段《欢乐颂》旋律。",
+        command="SPK_ODE\n",
+        expected="SPK_ODE_DONE",
+        timeout=22.0,
+    ),
 )
 
 

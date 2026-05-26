@@ -17,6 +17,7 @@ class SpeakerTestRoutesTest(unittest.TestCase):
         self.assertIn("tone", case_ids)
         self.assertIn("sweep", case_ids)
         self.assertIn("volume", case_ids)
+        self.assertIn("ode_to_joy", case_ids)
         for item in cases:
             self.assertTrue(item["command"].startswith("SPK_"))
             self.assertTrue(item["expected"].startswith("SPK_"))
@@ -37,6 +38,22 @@ class SpeakerTestRoutesTest(unittest.TestCase):
         device.cancel_waiter.assert_called_once_with("waiter-1")
         self.assertTrue(result["success"])
         self.assertEqual(result["response"], "SPK_OK")
+
+    def test_run_ode_to_joy_sends_melody_command(self):
+        device = Mock()
+        device.has_connections.return_value = True
+        device.register_waiter.return_value = {"waiter_id": "waiter-ode"}
+        device.send_command_async.return_value = True
+        device.await_waiter.return_value = "SPK_ODE_DONE"
+        ctx = Mock()
+
+        with patch.object(routes, "_get_services", return_value=(device, None)):
+            result = routes._run_speaker_test(ctx, "ode_to_joy")
+
+        device.send_command_async.assert_called_once_with("SPK_ODE\n")
+        device.cancel_waiter.assert_called_once_with("waiter-ode")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["response"], "SPK_ODE_DONE")
 
     def test_run_speaker_test_fails_without_device_connection(self):
         device = Mock()

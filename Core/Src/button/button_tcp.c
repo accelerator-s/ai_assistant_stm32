@@ -149,6 +149,19 @@ void handle_tcp_downlink(void)
             pump_speaker_test_response(1200u);
             (void)i2s_mic_play_volume_steps(levels, count);
         }
+        else if (strcmp(line, "SPK_ODE") == 0)
+        {
+            display_show_system_hint("SPK_ODE");
+            if (i2s_mic_play_ode_to_joy())
+            {
+                speaker_ode_done_pending = 1u;
+                pump_speaker_test_response(1500u);
+            }
+            else
+            {
+                display_show_system_hint("SPK_ODE_FAIL");
+            }
+        }
         else if (strncmp(line, "MIC_REC:", 8) == 0)
         {
             uint32_t duration_sec = (uint32_t)atoi(line + 8);

@@ -89,6 +89,7 @@ extern uint8_t speaker_test_ok_pending;
 extern uint8_t speaker_tone_done_pending;
 extern uint8_t speaker_sweep_done_pending;
 extern uint8_t speaker_volume_done_pending;
+extern uint8_t speaker_ode_done_pending;
 
 uint8_t tcp_ready_for_send(void);
 uint8_t tcp_idle_for_heartbeat(void);
@@ -103,6 +104,7 @@ void try_send_speaker_test_ok(void);
 void try_send_speaker_tone_done(void);
 void try_send_speaker_sweep_done(void);
 void try_send_speaker_volume_done(void);
+void try_send_speaker_ode_done(void);
 void pump_speaker_test_response(uint32_t timeout_ms);
 void mic_probe_start(void);
 void mic_probe_poll(void);

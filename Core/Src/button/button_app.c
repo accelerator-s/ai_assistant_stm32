@@ -143,6 +143,7 @@ void button_app_run(void)
         try_send_speaker_tone_done();
         try_send_speaker_sweep_done();
         try_send_speaker_volume_done();
+        try_send_speaker_ode_done();
         try_send_mic_rec_done();
 
         {

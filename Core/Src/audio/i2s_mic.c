@@ -166,6 +166,139 @@ static HAL_StatusTypeDef i2s_config_master_tx(uint32_t audio_freq)
     return HAL_I2S_Init(&hi2s2);
 }
 
+static const int16_t sine_lut_32[32] = {
+    0, 6393, 12539, 18204, 23170, 27245, 30273, 32137,
+    32767, 32137, 30273, 27245, 23170, 18204, 12539, 6393,
+    0, -6393, -12539, -18204, -23170, -27245, -30273, -32137,
+    -32767, -32137, -30273, -27245, -23170, -18204, -12539, -6393
+};
+
+static int16_t sine_sample_interp(uint32_t phase_acc)
+{
+    enum
+    {
+        SINE_TABLE_SIZE = 32u,
+        SINE_PHASE_FRAC_BITS = 16u
+    };
+
+    uint8_t idx = (uint8_t)((phase_acc >> SINE_PHASE_FRAC_BITS) &
+                            (SINE_TABLE_SIZE - 1u));
+    uint8_t next_idx = (uint8_t)((idx + 1u) & (SINE_TABLE_SIZE - 1u));
+    uint32_t frac = phase_acc & ((1u << SINE_PHASE_FRAC_BITS) - 1u);
+    int32_t current = sine_lut_32[idx];
+    int32_t next = sine_lut_32[next_idx];
+
+    return (int16_t)(current + (((next - current) * (int32_t)frac) >>
+                                SINE_PHASE_FRAC_BITS));
+}
+
+static uint8_t i2s_play_pcm_note(uint16_t frequency_hz,
+                                 uint16_t duration_ms,
+                                 uint16_t amplitude)
+{
+    enum
+    {
+        PLAY_SAMPLE_RATE = 16000u,
+        PLAY_FRAMES_PER_CHUNK = 512u,
+        SINE_TABLE_SIZE = 32u,
+        SINE_PHASE_FRAC_BITS = 16u,
+        NOTE_FADE_FRAMES = PLAY_SAMPLE_RATE / 200u,
+        PCM_FILTER_ALPHA_Q8 = 112u
+    };
+
+    uint16_t tx_buf[PLAY_FRAMES_PER_CHUNK * 2u];
+    uint32_t total_frames;
+    uint32_t frames_sent = 0u;
+    uint32_t phase_acc = 0u;
+    uint32_t phase_step = 0u;
+    uint32_t fade_frames;
+    int32_t filter_state = 0;
+
+    if (duration_ms == 0u)
+        return 1u;
+
+    if (frequency_hz > 0u)
+    {
+        if (frequency_hz < 20u)
+            frequency_hz = 20u;
+        if (frequency_hz > 4000u)
+            frequency_hz = 4000u;
+
+        phase_step = (uint32_t)(((uint64_t)frequency_hz *
+                                 SINE_TABLE_SIZE *
+                                 (1ULL << SINE_PHASE_FRAC_BITS)) /
+                                PLAY_SAMPLE_RATE);
+        if (phase_step == 0u)
+            phase_step = 1u;
+    }
+
+    total_frames = ((uint32_t)duration_ms * PLAY_SAMPLE_RATE) / 1000u;
+    if (total_frames == 0u)
+        total_frames = 1u;
+
+    fade_frames = NOTE_FADE_FRAMES;
+    if (fade_frames > (total_frames / 10u))
+        fade_frames = total_frames / 10u;
+    if ((fade_frames * 2u) > total_frames)
+        fade_frames = total_frames / 2u;
+
+    while (frames_sent < total_frames)
+    {
+        uint16_t frames_this_chunk = PLAY_FRAMES_PER_CHUNK;
+        uint16_t i;
+
+        if ((total_frames - frames_sent) < frames_this_chunk)
+        {
+            frames_this_chunk = (uint16_t)(total_frames - frames_sent);
+        }
+
+        for (i = 0u; i < frames_this_chunk; i++)
+        {
+            int16_t sample = 0;
+
+            if (frequency_hz > 0u)
+            {
+                uint32_t frame_index = frames_sent + i;
+                uint32_t envelope = 32767u;
+                sample = (int16_t)(((int32_t)sine_sample_interp(phase_acc) *
+                                    (int32_t)amplitude) / 32767);
+                if (fade_frames > 0u)
+                {
+                    if (frame_index < fade_frames)
+                    {
+                        envelope = (frame_index * 32767u) / fade_frames;
+                    }
+                    else if (frame_index >= (total_frames - fade_frames))
+                    {
+                        envelope = ((total_frames - frame_index) * 32767u) /
+                                   fade_frames;
+                    }
+                }
+                sample = (int16_t)(((int32_t)sample * (int32_t)envelope) /
+                                   32767);
+                filter_state += (((int32_t)sample - filter_state) *
+                                 PCM_FILTER_ALPHA_Q8) >> 8;
+                sample = (int16_t)filter_state;
+                phase_acc += phase_step;
+            }
+
+            tx_buf[i * 2u] = (uint16_t)sample;
+            tx_buf[i * 2u + 1u] = (uint16_t)sample;
+        }
+
+        if (HAL_I2S_Transmit(&hi2s2, tx_buf,
+                             (uint16_t)(frames_this_chunk * 2u),
+                             200u) != HAL_OK)
+        {
+            return 0u;
+        }
+
+        frames_sent += frames_this_chunk;
+    }
+
+    return 1u;
+}
+
 /**
  * DMA1 Channel4 初始化 — SPI2_RX 专用通道
  */
@@ -836,6 +969,99 @@ uint8_t i2s_mic_play_volume_steps(const uint8_t *levels_percent, uint8_t count)
 
             frames_sent += frames_this_chunk;
         }
+    }
+
+    (void)HAL_I2S_DeInit(&hi2s2);
+    i2s_gpio_init();
+    if (i2s_config_master_rx() == HAL_OK)
+    {
+        i2s_dma_init();
+    }
+    else
+    {
+        ok = 0u;
+    }
+
+    memset(i2s_dma_buf, 0, sizeof(i2s_dma_buf));
+    dbg_callback_count = 0u;
+    startup_discard_counter = 0u;
+    is_recording = 0u;
+
+    if (I2S_MIC_SLOT_SEL == I2S_MIC_SLOT_AUTO)
+    {
+        slot_detected = 0u;
+        slot_offset_runtime = 0u;
+        detect_callback_count = 0u;
+        detect_energy_pos0 = 0u;
+        detect_energy_pos1 = 0u;
+    }
+
+    i2s_bus_mode_idle();
+    return ok;
+}
+
+uint8_t i2s_mic_play_ode_to_joy(void)
+{
+    typedef struct
+    {
+        uint16_t frequency_hz;
+        uint16_t duration_ms;
+    } melody_note_t;
+
+    enum
+    {
+        ODE_AMPLITUDE = 6800u,
+        ODE_QUARTER_NOTE_MS = 500u,
+        ODE_HALF_NOTE_MS = ODE_QUARTER_NOTE_MS * 2u,
+        ODE_END_SILENCE_MS = 120u
+    };
+
+    static const melody_note_t melody[] = {
+        {330u, ODE_QUARTER_NOTE_MS}, {330u, ODE_QUARTER_NOTE_MS},
+        {349u, ODE_QUARTER_NOTE_MS}, {392u, ODE_QUARTER_NOTE_MS},
+        {392u, ODE_QUARTER_NOTE_MS}, {349u, ODE_QUARTER_NOTE_MS},
+        {330u, ODE_QUARTER_NOTE_MS}, {294u, ODE_QUARTER_NOTE_MS},
+        {262u, ODE_QUARTER_NOTE_MS}, {262u, ODE_QUARTER_NOTE_MS},
+        {294u, ODE_QUARTER_NOTE_MS}, {330u, ODE_QUARTER_NOTE_MS},
+        {330u, ODE_HALF_NOTE_MS}, {294u, ODE_HALF_NOTE_MS},
+
+        {330u, ODE_QUARTER_NOTE_MS}, {330u, ODE_QUARTER_NOTE_MS},
+        {349u, ODE_QUARTER_NOTE_MS}, {392u, ODE_QUARTER_NOTE_MS},
+        {392u, ODE_QUARTER_NOTE_MS}, {349u, ODE_QUARTER_NOTE_MS},
+        {330u, ODE_QUARTER_NOTE_MS}, {294u, ODE_QUARTER_NOTE_MS},
+        {262u, ODE_QUARTER_NOTE_MS}, {262u, ODE_QUARTER_NOTE_MS},
+        {294u, ODE_QUARTER_NOTE_MS}, {330u, ODE_QUARTER_NOTE_MS},
+        {294u, ODE_HALF_NOTE_MS}, {262u, ODE_HALF_NOTE_MS},
+    };
+
+    uint8_t ok = 1u;
+    uint16_t i;
+
+    if (is_recording)
+    {
+        HAL_I2S_DMAStop(&hi2s2);
+        is_recording = 0u;
+    }
+
+    i2s_speaker_gpio_init();
+    i2s_bus_mode_play();
+    (void)HAL_I2S_DeInit(&hi2s2);
+
+    if (i2s_config_master_tx(I2S_AUDIOFREQ_16K) != HAL_OK)
+    {
+        ok = 0u;
+    }
+
+    for (i = 0u; ok && i < (uint16_t)(sizeof(melody) / sizeof(melody[0])); i++)
+    {
+        ok = i2s_play_pcm_note(melody[i].frequency_hz,
+                               melody[i].duration_ms,
+                               ODE_AMPLITUDE);
+    }
+
+    if (ok)
+    {
+        ok = i2s_play_pcm_note(0u, ODE_END_SILENCE_MS, 0u);
     }
 
     (void)HAL_I2S_DeInit(&hi2s2);
