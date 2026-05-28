@@ -4,7 +4,7 @@ import logging
 import os
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, abort, jsonify, request, send_from_directory
 
 from .auth import AuthManager
 from .config import Config
@@ -12,7 +12,7 @@ from .database import DatabaseManager
 from .security import RateLimiter
 from .services.async_job_manager import AsyncJobManager
 from .services.device_manager import DeviceManager
-from .services.tts_service import synthesize as tts_synthesize
+from .services.tts_service import TTS_CONTENT_TYPE, synthesize as tts_synthesize
 
 # 配置日志
 logging.basicConfig(
@@ -146,7 +146,11 @@ def create_app() -> Flask:
     @app.route("/tts/<path:filename>")
     def serve_tts(filename):
         """分发 TTS 生成的音频文件"""
-        return send_from_directory(str(_TTS_AUDIO_DIR), filename)
+        if not filename.lower().endswith(".wav"):
+            abort(404)
+        return send_from_directory(
+            str(_TTS_AUDIO_DIR), filename, mimetype=TTS_CONTENT_TYPE
+        )
 
     # ---- 优雅关闭 ----
     import atexit
