@@ -130,6 +130,39 @@ void try_send_speaker_ode_done(void)
 }
 
 
+void try_send_speaker_wav_done(void)
+{
+    esp8266_send_result_t send_ret;
+    char msg[96];
+
+    if (!speaker_wav_done_pending)
+        return;
+
+    if (!tcp_ready_for_send())
+        return;
+
+    if (esp8266_tx_in_progress())
+        return;
+
+    snprintf(msg, sizeof(msg), "%s:rx=%lu:rd=%lu:und=%lu:drop=%lu",
+             wav_stream_is_error() ? "SPK_WAV_ERR" : "SPK_WAV_DONE",
+             (unsigned long)wav_stream_total_written(),
+             (unsigned long)wav_stream_total_read(),
+             (unsigned long)wav_stream_underrun_count(),
+             (unsigned long)esp8266_rx_drop_count());
+    send_ret = esp8266_tcp_send_line_async(msg);
+    if (send_ret == ESP8266_SEND_OK)
+    {
+        speaker_wav_done_pending = 0u;
+        display_show_system_hint(msg);
+        if (sys_state == STATE_IDLE)
+        {
+            display_update_bottom_hint("K1:录音 K2:发送/新建");
+        }
+    }
+}
+
+
 void pump_speaker_test_response(uint32_t timeout_ms)
 {
     uint32_t start = HAL_GetTick();
@@ -141,6 +174,7 @@ void pump_speaker_test_response(uint32_t timeout_ms)
         try_send_speaker_sweep_done();
         try_send_speaker_volume_done();
         try_send_speaker_ode_done();
+        try_send_speaker_wav_done();
         esp8266_poll();
 
         if (!speaker_test_ok_pending &&
@@ -148,6 +182,7 @@ void pump_speaker_test_response(uint32_t timeout_ms)
             !speaker_sweep_done_pending &&
             !speaker_volume_done_pending &&
             !speaker_ode_done_pending &&
+            !speaker_wav_done_pending &&
             !esp8266_tx_in_progress() &&
             esp8266_tx_queue_is_empty())
         {
@@ -155,4 +190,3 @@ void pump_speaker_test_response(uint32_t timeout_ms)
         }
     }
 }
-

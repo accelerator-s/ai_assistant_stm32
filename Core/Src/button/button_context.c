@@ -29,3 +29,5 @@ uint8_t speaker_tone_done_pending = 0u;
 uint8_t speaker_sweep_done_pending = 0u;
 uint8_t speaker_volume_done_pending = 0u;
 uint8_t speaker_ode_done_pending = 0u;
+uint8_t speaker_wav_done_pending = 0u;
+uint8_t wav_stream_active = 0u;

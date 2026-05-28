@@ -69,6 +69,48 @@ export default {
                 {{ states[item.id].result }}
               </div>
             </el-card>
+
+            <el-card shadow="hover" class="step-card"
+              :class="{
+                'step-success': wavState.status === 'success',
+                'step-error': wavState.status === 'error'
+              }"
+            >
+              <div class="step-header">
+                <div class="step-icon">WAV</div>
+                <div class="step-title">WAV 文件播放</div>
+                <el-button
+                  type="primary"
+                  size="small"
+                  :loading="wavState.loading"
+                  :disabled="!wavFile"
+                  @click="playWav"
+                >上传并播放</el-button>
+              </div>
+              <div class="step-desc">选择一个 WAV 文件，上传到服务器并通过扬声器播放。</div>
+              <div style="margin: 10px 0;">
+                <input type="file" ref="wavFileInput" accept=".wav" @change="onWavFileChange">
+              </div>
+              <div v-if="wavFileName" class="step-desc" style="margin-bottom: 6px;">
+                已选择文件：{{ wavFileName }}
+              </div>
+
+              <el-progress
+                v-if="wavState.loading || wavState.progress > 0"
+                :percentage="wavState.progress || 0"
+                :status="progressStatus(wavState.status, wavState.loading)"
+                :stroke-width="8"
+                style="margin: 10px 0 6px 0"
+              />
+
+              <div v-if="wavState.hint" class="step-desc" style="margin-bottom: 4px;">
+                {{ wavState.hint }}
+              </div>
+
+              <div v-if="wavState.result" class="step-result" :class="'text-' + wavState.status">
+                {{ wavState.result }}
+              </div>
+            </el-card>
           </div>
         </div>
       </div>
@@ -193,6 +235,66 @@ export default {
       }
     };
 
+    const wavFile = ref(null);
+    const wavFileName = ref('');
+    const wavState = ref(createState());
+
+    const onWavFileChange = (e) => {
+      const file = e.target.files?.[0] || null;
+      wavFile.value = file;
+      wavFileName.value = file ? file.name : '';
+    };
+
+    const playWav = async () => {
+      if (!wavFile.value) return;
+      const caseId = 'wav_play';
+      const token = Date.now();
+
+      wavState.value = {
+        ...createState(),
+        loading: true,
+        pollToken: token,
+      };
+      // 注册到 states 中以便 pollJob 可以读取 pollToken
+      states.value[caseId] = wavState.value;
+
+      try {
+        const formData = new FormData();
+        formData.append('file', wavFile.value);
+
+        const submitRes = await api.playWavFile(formData);
+        const jobId = submitRes?.job_id;
+        if (!submitRes?.success || !jobId) {
+          throw new Error(submitRes?.context || submitRes?.message || '上传失败');
+        }
+
+        const patch1 = {
+          progress: 5,
+          hint: submitRes.message || '文件已上传，正在播放...',
+          jobId,
+        };
+        wavState.value = { ...wavState.value, ...patch1 };
+        states.value[caseId] = wavState.value;
+
+        const job = await pollJob(caseId, jobId, token, 60000);
+        wavState.value = {
+          ...wavState.value,
+          loading: false,
+          status: 'success',
+          progress: 100,
+          result: job?.result?.context || 'WAV 文件播放完成',
+        };
+      } catch (err) {
+        wavState.value = {
+          ...wavState.value,
+          loading: false,
+          status: 'error',
+          result: err?.message || '播放失败，请重试',
+        };
+      }
+      states.value[caseId] = wavState.value;
+    };
+
     onMounted(loadCases);
     onBeforeUnmount(() => {
       disposed.value = true;
@@ -205,6 +307,11 @@ export default {
       loadCases,
       runCase,
       progressStatus,
+      wavFile,
+      wavFileName,
+      wavState,
+      onWavFileChange,
+      playWav,
     };
   },
 };

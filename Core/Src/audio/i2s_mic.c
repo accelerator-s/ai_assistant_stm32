@@ -4,6 +4,7 @@
  *        SPI2/I2S2 Master Receive + DMA1_Channel4 循环接收
  */
 #include "audio/i2s_mic.h"
+#include "audio/wav_stream.h"
 #include "debug/debug_uart.h"
 #include <string.h>
 
@@ -688,7 +689,10 @@ void HAL_I2S_TxHalfCpltCallback(I2S_HandleTypeDef *hi2s)
     if (hi2s->Instance != SPI2)
         return;
 
-    i2s_melody_dma_service_half(0u);
+    if (wav_stream_is_active())
+        wav_stream_dma_service_half(0u);
+    else
+        i2s_melody_dma_service_half(0u);
 }
 
 void HAL_I2S_TxCpltCallback(I2S_HandleTypeDef *hi2s)
@@ -696,12 +700,24 @@ void HAL_I2S_TxCpltCallback(I2S_HandleTypeDef *hi2s)
     if (hi2s->Instance != SPI2)
         return;
 
-    i2s_melody_dma_service_half(1u);
+    if (wav_stream_is_active())
+        wav_stream_dma_service_half(1u);
+    else
+        i2s_melody_dma_service_half(1u);
 }
 
 void HAL_I2S_ErrorCallback(I2S_HandleTypeDef *hi2s)
 {
-    if (hi2s->Instance != SPI2 || !i2s_melody_player.active)
+    if (hi2s->Instance != SPI2)
+        return;
+
+    if (wav_stream_is_active())
+    {
+        wav_stream_mark_error();
+        return;
+    }
+
+    if (!i2s_melody_player.active)
         return;
 
     i2s_melody_player.active = 0u;
@@ -1225,6 +1241,71 @@ uint8_t i2s_mic_play_volume_steps(const uint8_t *levels_percent, uint8_t count)
 
     i2s_bus_mode_idle();
     return ok;
+}
+
+uint8_t i2s_mic_play_wav_stream(uint16_t sample_rate)
+{
+    uint32_t audio_freq;
+
+    if (is_recording)
+    {
+        HAL_I2S_DMAStop(&hi2s2);
+        is_recording = 0u;
+    }
+
+    switch (sample_rate)
+    {
+    case 8000u:
+        audio_freq = I2S_AUDIOFREQ_8K;
+        break;
+    case 11025u:
+        audio_freq = I2S_AUDIOFREQ_11K;
+        break;
+    case 16000u:
+        audio_freq = I2S_AUDIOFREQ_16K;
+        break;
+    default:
+        return 0u;
+    }
+
+    i2s_speaker_gpio_init();
+    i2s_bus_mode_play();
+    (void)HAL_I2S_DeInit(&hi2s2);
+
+    if (i2s_config_master_tx(audio_freq) != HAL_OK)
+    {
+        return 0u;
+    }
+
+    /* DMA 启动由 wav_stream_start_playback() 内部完成 */
+    return 1u;
+}
+
+void i2s_mic_stop_wav_stream(void)
+{
+    (void)HAL_I2S_DMAStop(&hi2s2);
+    (void)HAL_I2S_DeInit(&hi2s2);
+    i2s_gpio_init();
+    if (i2s_config_master_rx() == HAL_OK)
+    {
+        i2s_dma_init();
+    }
+
+    memset(i2s_dma_buf, 0, sizeof(i2s_dma_buf));
+    dbg_callback_count = 0u;
+    startup_discard_counter = 0u;
+    is_recording = 0u;
+
+    if (I2S_MIC_SLOT_SEL == I2S_MIC_SLOT_AUTO)
+    {
+        slot_detected = 0u;
+        slot_offset_runtime = 0u;
+        detect_callback_count = 0u;
+        detect_energy_pos0 = 0u;
+        detect_energy_pos1 = 0u;
+    }
+
+    i2s_bus_mode_idle();
 }
 
 uint8_t i2s_mic_play_ode_to_joy(void)

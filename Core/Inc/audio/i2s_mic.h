@@ -147,4 +147,19 @@ uint8_t i2s_mic_play_volume_steps(const uint8_t *levels_percent, uint8_t count);
  */
 uint8_t i2s_mic_play_ode_to_joy(void);
 
+/**
+ * 切换 I2S2 到 Master TX 模式，准备 WAV 流式播放
+ * 停止录音、切换总线到扬声器模式、按 WAV 采样率配置 I2S TX
+ * 不启动 DMA（由 wav_stream_start_playback 在预缓冲达标后启动）
+ * @param sample_rate WAV PCM 采样率，支持 8000/11025/16000
+ * @return 1=成功, 0=I2S 配置失败
+ */
+uint8_t i2s_mic_play_wav_stream(uint16_t sample_rate);
+
+/**
+ * WAV 流式播放结束后清理
+ * DeInit I2S、恢复 RX 模式、重新初始化 DMA、恢复总线空闲状态
+ */
+void i2s_mic_stop_wav_stream(void);
+
 #endif /* __I2S_MIC_H */

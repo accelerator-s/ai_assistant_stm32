@@ -7,6 +7,7 @@
 #include "wifi/esp8266.h"
 #include "wifi/wifi_config.h"
 #include "audio/i2s_mic.h"
+#include "audio/wav_stream.h"
 #include "debug/debug_uart.h"
 #include "lcd/lcd.h"
 #include <stdint.h>
@@ -48,7 +49,7 @@ typedef enum
 #define K2_LONG_PRESS_MS 800u
 #define K2_DOUBLE_CLICK_MS 300u
 
-#define AUDIO_UPLOAD_BUFFER_SAMPLES 16000u
+#define AUDIO_UPLOAD_BUFFER_SAMPLES 8192u
 #define AUDIO_UPLOAD_CHUNK_SAMPLES 1024u
 #define AUDIO_UPLOAD_TRIGGER_SAMPLES AUDIO_UPLOAD_CHUNK_SAMPLES
 #define AUDIO_UPLOAD_DOWNSAMPLE 4u
@@ -90,6 +91,8 @@ extern uint8_t speaker_tone_done_pending;
 extern uint8_t speaker_sweep_done_pending;
 extern uint8_t speaker_volume_done_pending;
 extern uint8_t speaker_ode_done_pending;
+extern uint8_t speaker_wav_done_pending;
+extern uint8_t wav_stream_active;
 
 uint8_t tcp_ready_for_send(void);
 uint8_t tcp_idle_for_heartbeat(void);
@@ -105,6 +108,7 @@ void try_send_speaker_tone_done(void);
 void try_send_speaker_sweep_done(void);
 void try_send_speaker_volume_done(void);
 void try_send_speaker_ode_done(void);
+void try_send_speaker_wav_done(void);
 void pump_speaker_test_response(uint32_t timeout_ms);
 void mic_probe_start(void);
 void mic_probe_poll(void);
