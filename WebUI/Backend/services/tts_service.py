@@ -1,5 +1,6 @@
 """Azure TTS 语音合成服务"""
 
+import html
 import logging
 import time
 from pathlib import Path
@@ -7,6 +8,10 @@ from pathlib import Path
 import requests
 
 logger = logging.getLogger(__name__)
+
+AZURE_TTS_OUTPUT_FORMAT = "riff-16khz-16bit-mono-pcm"
+TTS_AUDIO_FORMAT = "wav"
+TTS_CONTENT_TYPE = "audio/wav"
 
 
 def synthesize(
@@ -19,30 +24,35 @@ def synthesize(
     """调用 Azure TTS 合成语音并保存到文件。
 
     Returns:
-        dict: {"success": True, "audio_url": "/tts/xxx.mp3"}
+        dict: {"success": True, "audio_url": "/tts/xxx.wav", "audio_format": "wav"}
               或 {"success": False, "message": "错误信息"}
     """
     region = (region or "").strip()
     subscription_key = (subscription_key or "").strip()
+    voice = (voice or "zh-CN-XiaoxiaoNeural").strip()
+    escaped_text = html.escape(text or "", quote=False)
+    escaped_voice = html.escape(voice, quote=True)
 
     if not region:
         return {"success": False, "message": "缺少 Azure 区域"}
     if not subscription_key:
         return {"success": False, "message": "缺少 Azure 订阅密钥"}
+    if not escaped_text:
+        return {"success": False, "message": "缺少待合成文本"}
 
     tts_url = f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"
 
     ssml = (
         f"<speak version='1.0' xml:lang='zh-CN'>"
-        f"<voice xml:lang='zh-CN' name='{voice}'>"
-        f"{text}"
+        f"<voice xml:lang='zh-CN' name='{escaped_voice}'>"
+        f"{escaped_text}"
         f"</voice></speak>"
     )
 
     headers = {
         "Ocp-Apim-Subscription-Key": subscription_key,
         "Content-Type": "application/ssml+xml",
-        "X-Microsoft-OutputFormat": "audio-16khz-128kbitrate-mono-mp3",
+        "X-Microsoft-OutputFormat": AZURE_TTS_OUTPUT_FORMAT,
         "User-Agent": "STM32-AI-Assistant",
     }
 
@@ -60,11 +70,18 @@ def synthesize(
                 "message": f"Azure TTS 错误: {response.status_code} {response.reason}",
             }
 
-        filename = f"tts_{int(time.time() * 1000)}.mp3"
+        filename = f"tts_{int(time.time() * 1000)}.{TTS_AUDIO_FORMAT}"
         filepath = output_dir / filename
+        output_dir.mkdir(parents=True, exist_ok=True)
         filepath.write_bytes(response.content)
 
-        return {"success": True, "audio_url": f"/tts/{filename}"}
+        return {
+            "success": True,
+            "audio_url": f"/tts/{filename}",
+            "audio_filename": filename,
+            "audio_format": TTS_AUDIO_FORMAT,
+            "content_type": TTS_CONTENT_TYPE,
+        }
 
     except Exception as e:
         logger.exception("Azure TTS 接口异常")

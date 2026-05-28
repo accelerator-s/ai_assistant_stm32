@@ -24,8 +24,22 @@
 
 void SystemClock_Config(void);
 
+static void Early_DebugCleanup(void)
+{
+    SCB->VTOR = FLASH_BASE;
+    __HAL_RCC_DMA1_CLK_ENABLE();
+    DMA1_Channel4->CCR = 0u;
+    DMA1_Channel5->CCR = 0u;
+    DMA1->IFCR = DMA_IFCR_CGIF4 | DMA_IFCR_CGIF5;
+    HAL_NVIC_DisableIRQ(DMA1_Channel4_IRQn);
+    HAL_NVIC_DisableIRQ(DMA1_Channel5_IRQn);
+    HAL_NVIC_ClearPendingIRQ(DMA1_Channel4_IRQn);
+    HAL_NVIC_ClearPendingIRQ(DMA1_Channel5_IRQn);
+}
+
 int main(void)
 {
+    Early_DebugCleanup();
     HAL_Init();
     SystemClock_Config();
 

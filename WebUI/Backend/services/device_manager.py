@@ -880,7 +880,8 @@ class DeviceManager:
 
             try:
                 device.conn.sendall(payload)
-                logger.info("设备下发完成: %s bytes=%d", key, len(payload))
+                if len(payload) <= 32:
+                    logger.info("设备下发完成: %s bytes=%d", key, len(payload))
             except Exception:
                 logger.warning(f"设备 {key} 异步发送失败，关闭连接")
                 self._remove_client(device)

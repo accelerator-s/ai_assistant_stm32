@@ -114,6 +114,13 @@ const api = {
   cancelSpeakerTestJob(jobId) {
     return http.delete(`/test/speaker/jobs/${jobId}`).then((r) => r.data);
   },
+  playWavFile(formData) {
+    return http
+      .post("/test/speaker/wav/play", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      })
+      .then((r) => r.data);
+  },
   async waitMicTestJob(
     jobId,
     { interval = 500, timeout = 30000, onProgress = null } = {},

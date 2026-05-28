@@ -143,7 +143,22 @@ void button_app_run(void)
         try_send_speaker_tone_done();
         try_send_speaker_sweep_done();
         try_send_speaker_volume_done();
+        try_send_speaker_ode_done();
+        try_send_speaker_wav_done();
         try_send_mic_rec_done();
+
+        /* WAV 流式播放服务 */
+        if (wav_stream_active)
+        {
+            wav_stream_service();
+
+            if (wav_stream_is_done() || wav_stream_is_error())
+            {
+                i2s_mic_stop_wav_stream();
+                speaker_wav_done_pending = 1u;
+                wav_stream_active = 0u;
+            }
+        }
 
         {
             key_event_t k2_ev = detect_k2_event();

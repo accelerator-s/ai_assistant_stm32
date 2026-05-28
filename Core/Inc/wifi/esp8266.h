@@ -200,6 +200,25 @@ extern "C"
      */
     int esp8266_tcp_read_line(char *out, uint16_t out_size);
 
+    /**
+     * @brief 从 +IPD 载荷中读取原始二进制数据
+     *        不按换行符切分，直接拷贝可用字节到输出缓冲区
+     * @param out      输出缓冲区
+     * @param max_len  输出缓冲区最大字节数
+     * @return 实际读取的字节数，0=无可用数据
+     */
+    uint16_t esp8266_tcp_read_raw(uint8_t *out, uint16_t max_len);
+
+    /**
+     * @brief 获取 ESP8266 UART RX 缓冲溢出丢字节计数
+     */
+    uint32_t esp8266_rx_drop_count(void);
+
+    /**
+     * @brief 清零 ESP8266 UART RX 丢字节计数
+     */
+    void esp8266_rx_drop_reset(void);
+
     /* ==================== 中断接口 ==================== */
 
     /**

@@ -80,7 +80,8 @@ Core/Src/button/button_key.c \
 Core/Src/button/button_mic_test.c \
 Core/Src/button/button_speaker_test.c \
 Core/Src/button/button_state_handlers.c \
-Core/Src/button/button_tcp.c
+Core/Src/button/button_tcp.c \
+Core/Src/audio/wav_stream.c
 
 # ASM sources
 ASM_SOURCES =  \

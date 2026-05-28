@@ -14,6 +14,12 @@ uint8_t tcp_idle_for_heartbeat(void)
     if (rec_end_pending || mic_rec_done_pending)
         return 0u;
 
+    if (speaker_wav_done_pending)
+        return 0u;
+
+    if (wav_stream_active)
+        return 0u;
+
     if (audio_buffer_available() > 0u)
         return 0u;
 
@@ -28,6 +34,10 @@ void handle_tcp_downlink(void)
 {
     char line[160];
     uint8_t loop_guard = 6;
+
+    /* WAV 流接收期间，所有 TCP 数据由 wav_stream_service 的 read_raw 处理 */
+    if (wav_stream_active)
+        return;
 
     while (loop_guard-- > 0 && esp8266_tcp_read_line(line, sizeof(line)))
     {
@@ -149,6 +159,53 @@ void handle_tcp_downlink(void)
             pump_speaker_test_response(1200u);
             (void)i2s_mic_play_volume_steps(levels, count);
         }
+        else if (strcmp(line, "SPK_ODE") == 0)
+        {
+            display_show_system_hint("SPK_ODE");
+            if (i2s_mic_play_ode_to_joy())
+            {
+                speaker_ode_done_pending = 1u;
+                pump_speaker_test_response(1500u);
+            }
+            else
+            {
+                display_show_system_hint("SPK_ODE_FAIL");
+            }
+        }
+        else if (strncmp(line, "SPK_WAV:", 8) == 0)
+        {
+            /* SPK_WAV:<pcm_size>:<sample_rate> */
+            uint32_t pcm_size = 0u;
+            uint16_t sample_rate = 16000u;
+            char *rate_part = NULL;
+
+            pcm_size = (uint32_t)strtoul(line + 8, NULL, 10);
+            rate_part = strchr(line + 8, ':');
+            if (rate_part)
+            {
+                sample_rate = (uint16_t)atoi(rate_part + 1);
+            }
+
+            display_show_system_hint("SPK_WAV");
+
+            if (pcm_size == 0u)
+            {
+                speaker_wav_done_pending = 1u;
+                wav_stream_active = 0u;
+            }
+            else if (!i2s_mic_play_wav_stream(sample_rate))
+            {
+                display_show_system_hint("SPK_WAV_ERR");
+                speaker_wav_done_pending = 1u;
+                wav_stream_active = 0u;
+            }
+            else
+            {
+                wav_stream_init(pcm_size, sample_rate);
+                wav_stream_active = 1u;
+                break;   /* 立即退出，后续 PCM 数据留给 wav_stream_service */
+            }
+        }
         else if (strncmp(line, "MIC_REC:", 8) == 0)
         {
             uint32_t duration_sec = (uint32_t)atoi(line + 8);
@@ -156,4 +213,3 @@ void handle_tcp_downlink(void)
         }
     }
 }
-

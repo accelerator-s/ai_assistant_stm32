@@ -38,6 +38,7 @@ static volatile uint16_t rx_read_idx;
 
 /* 单字节接收缓存，中断逐字节接收 */
 static uint8_t rx_byte;
+static volatile uint32_t s_rx_drop_count = 0u;
 
 /* UART 发送完成标志：所有异步发送动作都必须等上一次真正发完 */
 static volatile uint8_t s_uart_tx_busy = 0u;
@@ -52,6 +53,91 @@ static uint16_t s_tcp_parse_offset;
 static uint16_t s_ipd_payload_offset;
 static uint16_t s_ipd_payload_len;
 static uint16_t s_ipd_payload_pos;
+
+static uint16_t esp8266_rx_available_from(uint16_t read_idx, uint16_t write_idx)
+{
+    if (write_idx >= read_idx)
+        return (uint16_t)(write_idx - read_idx);
+
+    return (uint16_t)(ESP8266_RX_BUF_SIZE - read_idx + write_idx);
+}
+
+static uint16_t esp8266_rx_advance(uint16_t idx, uint16_t count)
+{
+    idx = (uint16_t)(idx + count);
+    while (idx >= ESP8266_RX_BUF_SIZE)
+        idx = (uint16_t)(idx - ESP8266_RX_BUF_SIZE);
+    return idx;
+}
+
+static void *esp8266_find_bytes(const void *buf, uint16_t len,
+                                const void *needle, uint16_t needle_len)
+{
+    const uint8_t *p = (const uint8_t *)buf;
+    const uint8_t *n = (const uint8_t *)needle;
+    uint16_t i;
+
+    if (!buf || !needle || needle_len == 0u || len < needle_len)
+        return NULL;
+
+    for (i = 0u; i <= (uint16_t)(len - needle_len); i++)
+    {
+        if (p[i] == n[0] && memcmp(p + i, n, needle_len) == 0)
+            return (void *)(p + i);
+    }
+
+    return NULL;
+}
+
+static int esp8266_parse_ipd_header(const char *buf, uint16_t buf_len,
+                                    uint16_t ipd_pos,
+                                    uint16_t *payload_offset,
+                                    uint16_t *payload_len)
+{
+    uint16_t i;
+    uint16_t colon = buf_len;
+    uint16_t len_start;
+    uint32_t len = 0u;
+
+    if (!buf || !payload_offset || !payload_len)
+        return -1;
+
+    if ((uint32_t)ipd_pos + 5u >= (uint32_t)buf_len)
+        return 0;
+
+    len_start = (uint16_t)(ipd_pos + 5u);
+    for (i = len_start; i < buf_len; i++)
+    {
+        if (buf[i] == ':')
+        {
+            colon = i;
+            break;
+        }
+        if (buf[i] == ',')
+            len_start = (uint16_t)(i + 1u);
+        if ((uint16_t)(i - ipd_pos) > 24u)
+            return -1;
+    }
+
+    if (colon >= buf_len)
+        return 0;
+
+    if (len_start >= colon)
+        return -1;
+
+    for (i = len_start; i < colon; i++)
+    {
+        if (buf[i] < '0' || buf[i] > '9')
+            return -1;
+        len = (len * 10u) + (uint32_t)(buf[i] - '0');
+        if (len > 65535u)
+            return -1;
+    }
+
+    *payload_offset = (uint16_t)(colon + 1u);
+    *payload_len = (uint16_t)len;
+    return 1;
+}
 
 /* 模块对外状态 */
 static esp8266_status_t s_status = ESP8266_STATUS_IDLE;
@@ -214,7 +300,6 @@ static void esp8266_clear_rx(void)
     __disable_irq();
     rx_write_idx = 0;
     rx_read_idx = 0;
-    memset(rx_ring_buf, 0, sizeof(rx_ring_buf));
     s_tcp_parse_offset = 0;
     s_ipd_payload_offset = 0;
     s_ipd_payload_len = 0;
@@ -230,27 +315,25 @@ static void esp8266_reset_ipd_parser(void)
     s_ipd_payload_pos = 0;
 }
 
+static uint16_t esp8266_snapshot_resp(void);
+
 static void esp8266_consume_rx(uint16_t count)
 {
-    uint16_t remaining;
+    uint16_t avail;
 
     if (count == 0u)
         return;
 
     __disable_irq();
-    if (count >= rx_write_idx)
+    avail = esp8266_rx_available_from(rx_read_idx, rx_write_idx);
+    if (count >= avail)
     {
-        rx_write_idx = 0;
-        rx_read_idx = 0;
+        rx_read_idx = rx_write_idx;
     }
     else
     {
-        remaining = (uint16_t)(rx_write_idx - count);
-        memmove(rx_ring_buf, rx_ring_buf + count, remaining);
-        rx_write_idx = remaining;
-        rx_read_idx = 0;
+        rx_read_idx = esp8266_rx_advance(rx_read_idx, count);
     }
-    memset(rx_ring_buf + rx_write_idx, 0, sizeof(rx_ring_buf) - rx_write_idx);
     __enable_irq();
 
     esp8266_reset_ipd_parser();
@@ -264,11 +347,10 @@ static void esp8266_clear_at_resp_keep_ipd(void)
     uint16_t partial_pos = ESP8266_RX_BUF_SIZE;
     uint16_t len;
 
-    __disable_irq();
-    len = rx_write_idx;
+    len = esp8266_snapshot_resp();
     for (i = 0; (i + sizeof(ipd_prefix)) <= len; i++)
     {
-        if (memcmp(rx_ring_buf + i, ipd_prefix, sizeof(ipd_prefix)) == 0)
+        if (memcmp(resp_buf + i, ipd_prefix, sizeof(ipd_prefix)) == 0)
         {
             ipd_pos = i;
             break;
@@ -284,7 +366,7 @@ static void esp8266_clear_at_resp_keep_ipd(void)
 
         for (partial_len = max_partial; partial_len > 0u; partial_len--)
         {
-            if (memcmp(rx_ring_buf + len - partial_len, ipd_prefix, partial_len) == 0)
+            if (memcmp(resp_buf + len - partial_len, ipd_prefix, partial_len) == 0)
             {
                 partial_pos = (uint16_t)(len - partial_len);
                 break;
@@ -294,42 +376,45 @@ static void esp8266_clear_at_resp_keep_ipd(void)
 
     if (ipd_pos < len)
     {
-        uint16_t keep_len = (uint16_t)(len - ipd_pos);
-        memmove(rx_ring_buf, rx_ring_buf + ipd_pos, keep_len);
-        rx_write_idx = keep_len;
-        rx_read_idx = 0;
-        memset(rx_ring_buf + rx_write_idx, 0, sizeof(rx_ring_buf) - rx_write_idx);
+        esp8266_consume_rx(ipd_pos);
     }
     else if (partial_pos < len)
     {
-        uint16_t keep_len = (uint16_t)(len - partial_pos);
-        memmove(rx_ring_buf, rx_ring_buf + partial_pos, keep_len);
-        rx_write_idx = keep_len;
-        rx_read_idx = 0;
-        memset(rx_ring_buf + rx_write_idx, 0, sizeof(rx_ring_buf) - rx_write_idx);
+        esp8266_consume_rx(partial_pos);
     }
     else
     {
-        rx_write_idx = 0;
-        rx_read_idx = 0;
-        memset(rx_ring_buf, 0, sizeof(rx_ring_buf));
+        esp8266_consume_rx(len);
     }
-    __enable_irq();
 
     esp8266_reset_ipd_parser();
 }
 
 static uint16_t esp8266_snapshot_resp(void)
 {
+    uint16_t read_idx;
+    uint16_t write_idx;
     uint16_t len;
+    uint16_t first_len;
 
     __disable_irq();
-    len = rx_write_idx;
+    read_idx = rx_read_idx;
+    write_idx = rx_write_idx;
+    __enable_irq();
+
+    len = esp8266_rx_available_from(read_idx, write_idx);
     if (len > (sizeof(resp_buf) - 1u))
         len = (uint16_t)(sizeof(resp_buf) - 1u);
-    memcpy(resp_buf, rx_ring_buf, len);
+
+    first_len = (uint16_t)(ESP8266_RX_BUF_SIZE - read_idx);
+    if (first_len > len)
+        first_len = len;
+
+    if (first_len > 0u)
+        memcpy(resp_buf, rx_ring_buf + read_idx, first_len);
+    if (len > first_len)
+        memcpy(resp_buf + first_len, rx_ring_buf, (uint16_t)(len - first_len));
     resp_buf[len] = '\0';
-    __enable_irq();
 
     return len;
 }
@@ -344,6 +429,38 @@ static int esp8266_uart_tx_ready(void)
 {
     return (s_uart_tx_busy == 0u) &&
            (huart_esp8266.gState == HAL_UART_STATE_READY);
+}
+
+static void esp8266_store_rx_byte(uint8_t byte)
+{
+    uint16_t next_idx = esp8266_rx_advance(rx_write_idx, 1u);
+
+    if (next_idx != rx_read_idx)
+    {
+        rx_ring_buf[rx_write_idx] = byte;
+        rx_write_idx = next_idx;
+    }
+    else
+    {
+        s_rx_drop_count++;
+    }
+}
+
+static void esp8266_uart_start_rx_irq(void)
+{
+    huart_esp8266.pRxBuffPtr = &rx_byte;
+    huart_esp8266.RxXferSize = 1u;
+    huart_esp8266.RxXferCount = 1u;
+    huart_esp8266.RxState = HAL_UART_STATE_BUSY_RX;
+    huart_esp8266.ErrorCode = HAL_UART_ERROR_NONE;
+
+    __HAL_UART_CLEAR_OREFLAG(&huart_esp8266);
+    __HAL_UART_CLEAR_NEFLAG(&huart_esp8266);
+    __HAL_UART_CLEAR_FEFLAG(&huart_esp8266);
+    __HAL_UART_CLEAR_PEFLAG(&huart_esp8266);
+    __HAL_UART_ENABLE_IT(&huart_esp8266, UART_IT_RXNE);
+    __HAL_UART_ENABLE_IT(&huart_esp8266, UART_IT_ERR);
+    __HAL_UART_ENABLE_IT(&huart_esp8266, UART_IT_PE);
 }
 
 static int esp8266_send_raw_buf(const uint8_t *data, uint16_t len)
@@ -518,12 +635,12 @@ static void esp8266_uart_init(void)
     huart_esp8266.Init.OverSampling = UART_OVERSAMPLING_16;
     HAL_UART_Init(&huart_esp8266);
 
-    HAL_NVIC_SetPriority(ESP8266_USART_IRQn, 1, 0);
+    HAL_NVIC_SetPriority(ESP8266_USART_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(ESP8266_USART_IRQn);
 
     rx_write_idx = 0;
     rx_read_idx = 0;
-    HAL_UART_Receive_IT(&huart_esp8266, &rx_byte, 1);
+    esp8266_uart_start_rx_irq();
 }
 
 static void esp8266_uart_set_baud(uint32_t baud)
@@ -533,8 +650,8 @@ static void esp8266_uart_set_baud(uint32_t baud)
     HAL_UART_Init(&huart_esp8266);
 
     rx_write_idx = 0;
-    memset(rx_ring_buf, 0, sizeof(rx_ring_buf));
-    HAL_UART_Receive_IT(&huart_esp8266, &rx_byte, 1);
+    rx_read_idx = 0;
+    esp8266_uart_start_rx_irq();
 }
 
 static void esp8266_uart_recover(void)
@@ -552,8 +669,8 @@ static void esp8266_uart_recover(void)
     }
 
     rx_write_idx = 0;
-    memset(rx_ring_buf, 0, sizeof(rx_ring_buf));
-    HAL_UART_Receive_IT(&huart_esp8266, &rx_byte, 1);
+    rx_read_idx = 0;
+    esp8266_uart_start_rx_irq();
 }
 
 /* ==================== 发送队列实现 ==================== */
@@ -1111,6 +1228,7 @@ static void init_poll(void)
         if (esp8266_phase_timeout(HW_RST_LOW_MS))
         {
             HAL_GPIO_WritePin(ESP8266_RST_PORT, ESP8266_RST_PIN, GPIO_PIN_SET);
+            esp8266_clear_rx();
             esp8266_set_phase(INIT_RST_WAIT);
         }
         break;
@@ -1118,12 +1236,14 @@ static void init_poll(void)
     case INIT_RST_WAIT:
         if (esp8266_check_resp("ready") || esp8266_check_resp("Ready"))
         {
+            esp8266_clear_rx();
             esp8266_uart_recover();
             s_retry_count = 0u;
             esp8266_set_phase(INIT_AT_SEND);
         }
         else if (esp8266_phase_timeout(RST_TIMEOUT))
         {
+            esp8266_clear_rx();
             esp8266_uart_recover();
             s_retry_count = 0u;
             esp8266_set_phase(INIT_AT_SEND);
@@ -1475,16 +1595,14 @@ int esp8266_disconnect_tcp_async(void)
 
 int esp8266_tcp_read_line(char *out, uint16_t out_size)
 {
+    static const uint8_t ipd_prefix[] = {'+', 'I', 'P', 'D', ','};
     char *base;
     char *ipd;
-    char *comma;
-    char *len_start;
-    char *next_comma;
-    char *colon;
     char *payload;
     char *line_end;
     uint16_t buf_len;
     uint16_t payload_len;
+    uint16_t payload_offset;
     uint16_t avail;
     uint16_t line_len;
     uint16_t line_start_pos;
@@ -1499,8 +1617,7 @@ int esp8266_tcp_read_line(char *out, uint16_t out_size)
     if (s_tcp_phase != TCP_PHASE_DONE_OK || s_tx_phase != TX_ENGINE_IDLE)
         return 0;
 
-    esp8266_snapshot_resp();
-    buf_len = (uint16_t)strlen(resp_buf);
+    buf_len = esp8266_snapshot_resp();
     if (buf_len == 0u)
     {
         esp8266_reset_ipd_parser();
@@ -1574,36 +1691,179 @@ int esp8266_tcp_read_line(char *out, uint16_t out_size)
         }
 
         base = resp_buf + s_tcp_parse_offset;
-        ipd = strstr(base, "+IPD,");
+        ipd = (char *)esp8266_find_bytes(base,
+                                         (uint16_t)(buf_len - s_tcp_parse_offset),
+                                         ipd_prefix,
+                                         (uint16_t)sizeof(ipd_prefix));
         if (!ipd)
-            return 0;
-
-        comma = strchr(ipd, ',');
-        colon = strchr(ipd, ':');
-        if (!comma || !colon || colon <= comma)
-            return 0;
-
-        len_start = comma + 1;
-        next_comma = strchr(len_start, ',');
-        if (next_comma && next_comma < colon)
         {
-            len_start = next_comma + 1;
+            if (buf_len > (sizeof(ipd_prefix) - 1u))
+                esp8266_consume_rx((uint16_t)(buf_len - (sizeof(ipd_prefix) - 1u)));
+            return 0;
         }
 
-        payload_len = (uint16_t)atoi(len_start);
-        payload = colon + 1;
-        avail = (uint16_t)(resp_buf + buf_len - payload);
+        {
+            int parse_ret = esp8266_parse_ipd_header(resp_buf,
+                                                     buf_len,
+                                                     (uint16_t)(ipd - resp_buf),
+                                                     &payload_offset,
+                                                     &payload_len);
+            if (parse_ret == 0)
+                return 0;
+            if (parse_ret < 0)
+            {
+                esp8266_consume_rx((uint16_t)((ipd - resp_buf) + sizeof(ipd_prefix)));
+                return 0;
+            }
+        }
+
         if (payload_len == 0u)
         {
-            s_tcp_parse_offset = (uint16_t)(payload - resp_buf);
+            s_tcp_parse_offset = payload_offset;
             continue;
         }
+
+        payload = resp_buf + payload_offset;
+        avail = (uint16_t)(resp_buf + buf_len - payload);
         if (avail < payload_len)
             return 0;
 
-        s_ipd_payload_offset = (uint16_t)(payload - resp_buf);
+        s_ipd_payload_offset = payload_offset;
         s_ipd_payload_len = payload_len;
         s_ipd_payload_pos = 0u;
+    }
+}
+
+uint16_t esp8266_tcp_read_raw(uint8_t *out, uint16_t max_len)
+{
+    static const uint8_t ipd_prefix[] = {'+', 'I', 'P', 'D', ','};
+    char *base;
+    char *ipd;
+    char *payload;
+    uint16_t buf_len;
+    uint16_t payload_len;
+    uint16_t payload_offset;
+    uint16_t avail;
+    uint16_t copy_len;
+    uint16_t consumed;
+
+    if (!out || max_len == 0u)
+        return 0u;
+
+    if (s_tcp_phase != TCP_PHASE_DONE_OK || s_tx_phase != TX_ENGINE_IDLE)
+        return 0u;
+
+    buf_len = esp8266_snapshot_resp();
+    if (buf_len == 0u)
+    {
+        esp8266_reset_ipd_parser();
+        return 0u;
+    }
+
+    /* 已有解析好的 IPD 载荷 */
+    if (s_ipd_payload_len > 0u)
+    {
+        if ((uint32_t)s_ipd_payload_offset + (uint32_t)s_ipd_payload_len > (uint32_t)buf_len)
+            return 0u;
+
+        payload = resp_buf + s_ipd_payload_offset;
+        if (s_ipd_payload_pos >= s_ipd_payload_len)
+        {
+            consumed = (uint16_t)(s_ipd_payload_offset + s_ipd_payload_len);
+            esp8266_consume_rx(consumed);
+            return 0u;
+        }
+
+        avail = (uint16_t)(s_ipd_payload_len - s_ipd_payload_pos);
+        copy_len = (avail <= max_len) ? avail : max_len;
+        memcpy(out, payload + s_ipd_payload_pos, copy_len);
+        s_ipd_payload_pos += copy_len;
+
+        if (s_ipd_payload_pos >= s_ipd_payload_len)
+        {
+            consumed = (uint16_t)(s_ipd_payload_offset + s_ipd_payload_len);
+            esp8266_consume_rx(consumed);
+        }
+        return copy_len;
+    }
+
+    /* 寻找新的 +IPD 头 */
+    if (s_tcp_parse_offset >= buf_len)
+    {
+        if (buf_len > 32u)
+            s_tcp_parse_offset = (uint16_t)(buf_len - 32u);
+        else
+            s_tcp_parse_offset = 0u;
+    }
+
+    base = resp_buf + s_tcp_parse_offset;
+    ipd = (char *)esp8266_find_bytes(base,
+                                     (uint16_t)(buf_len - s_tcp_parse_offset),
+                                     ipd_prefix,
+                                     (uint16_t)sizeof(ipd_prefix));
+    if (!ipd)
+    {
+        if (buf_len > (sizeof(ipd_prefix) - 1u))
+            esp8266_consume_rx((uint16_t)(buf_len - (sizeof(ipd_prefix) - 1u)));
+        return 0u;
+    }
+
+    {
+        int parse_ret = esp8266_parse_ipd_header(resp_buf,
+                                                 buf_len,
+                                                 (uint16_t)(ipd - resp_buf),
+                                                 &payload_offset,
+                                                 &payload_len);
+        if (parse_ret == 0)
+            return 0u;
+        if (parse_ret < 0)
+        {
+            esp8266_consume_rx((uint16_t)((ipd - resp_buf) + sizeof(ipd_prefix)));
+            return 0u;
+        }
+    }
+
+    if (payload_len == 0u)
+    {
+        s_tcp_parse_offset = payload_offset;
+        return 0u;
+    }
+
+    payload = resp_buf + payload_offset;
+    avail = (uint16_t)(resp_buf + buf_len - payload);
+    if (avail < payload_len)
+        return 0u;
+
+    s_ipd_payload_offset = payload_offset;
+    s_ipd_payload_len = payload_len;
+    s_ipd_payload_pos = 0u;
+
+    copy_len = (payload_len <= max_len) ? payload_len : max_len;
+    memcpy(out, payload, copy_len);
+    s_ipd_payload_pos = copy_len;
+
+    if (s_ipd_payload_pos >= s_ipd_payload_len)
+    {
+        consumed = (uint16_t)(s_ipd_payload_offset + s_ipd_payload_len);
+        esp8266_consume_rx(consumed);
+    }
+    return copy_len;
+}
+
+uint32_t esp8266_rx_drop_count(void)
+{
+    return s_rx_drop_count;
+}
+
+void esp8266_rx_drop_reset(void)
+{
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    s_rx_drop_count = 0u;
+    if (primask == 0u)
+    {
+        __enable_irq();
     }
 }
 
@@ -1611,7 +1871,63 @@ int esp8266_tcp_read_line(char *out, uint16_t out_size)
 
 void esp8266_uart_irq_handler(void)
 {
-    HAL_UART_IRQHandler(&huart_esp8266);
+    USART_TypeDef *uart = huart_esp8266.Instance;
+    uint32_t sr;
+    uint8_t handled_rx = 0u;
+    uint8_t i;
+
+    for (i = 0u; i < 8u; i++)
+    {
+        sr = uart->SR;
+        if ((sr & (USART_SR_RXNE | USART_SR_ORE | USART_SR_NE |
+                   USART_SR_FE | USART_SR_PE)) == 0u)
+        {
+            break;
+        }
+
+        if ((sr & USART_SR_RXNE) != 0u)
+        {
+            uint8_t byte = (uint8_t)(uart->DR & 0xFFu);
+
+            handled_rx = 1u;
+            if ((sr & (USART_SR_NE | USART_SR_FE | USART_SR_PE)) == 0u)
+            {
+                esp8266_store_rx_byte(byte);
+            }
+            else
+            {
+                s_rx_drop_count++;
+            }
+
+            if ((sr & USART_SR_ORE) != 0u)
+            {
+                s_rx_drop_count++;
+            }
+        }
+        else
+        {
+            volatile uint32_t dr = uart->DR;
+            (void)dr;
+            s_rx_drop_count++;
+        }
+    }
+
+    if (handled_rx)
+    {
+        huart_esp8266.ErrorCode = HAL_UART_ERROR_NONE;
+        __HAL_UART_ENABLE_IT(&huart_esp8266, UART_IT_RXNE);
+        __HAL_UART_ENABLE_IT(&huart_esp8266, UART_IT_ERR);
+        __HAL_UART_ENABLE_IT(&huart_esp8266, UART_IT_PE);
+    }
+
+    sr = uart->SR;
+    if (((sr & USART_SR_TXE) != 0u &&
+         __HAL_UART_GET_IT_SOURCE(&huart_esp8266, UART_IT_TXE) != RESET) ||
+        ((sr & USART_SR_TC) != 0u &&
+         __HAL_UART_GET_IT_SOURCE(&huart_esp8266, UART_IT_TC) != RESET))
+    {
+        HAL_UART_IRQHandler(&huart_esp8266);
+    }
 }
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
@@ -1627,10 +1943,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == ESP8266_USART)
     {
-        if (rx_write_idx < (ESP8266_RX_BUF_SIZE - 1u))
-            rx_ring_buf[rx_write_idx++] = rx_byte;
-
-        HAL_UART_Receive_IT(&huart_esp8266, &rx_byte, 1);
+        esp8266_store_rx_byte(rx_byte);
+        esp8266_uart_start_rx_irq();
     }
 }
 
@@ -1640,10 +1954,11 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     {
         s_uart_tx_busy = 0u;
         s_uart_tx_len = 0u;
+        s_rx_drop_count++;
         __HAL_UART_CLEAR_OREFLAG(huart);
         __HAL_UART_CLEAR_NEFLAG(huart);
         __HAL_UART_CLEAR_FEFLAG(huart);
         __HAL_UART_CLEAR_PEFLAG(huart);
-        HAL_UART_Receive_IT(huart, &rx_byte, 1);
+        esp8266_uart_start_rx_irq();
     }
 }
