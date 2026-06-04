@@ -48,6 +48,7 @@ typedef enum
 
 #define K2_LONG_PRESS_MS 800u
 #define K2_DOUBLE_CLICK_MS 300u
+#define K1_DEBOUNCE_MS 80u
 
 #define AUDIO_UPLOAD_BUFFER_SAMPLES 8192u
 #define AUDIO_UPLOAD_CHUNK_SAMPLES 1024u
@@ -116,9 +117,10 @@ void mic_rec_test_start(uint32_t duration_sec);
 void mic_rec_test_poll(void);
 void handle_tcp_downlink(void);
 key_event_t detect_k2_event(void);
-void handle_idle(key_event_t k2_ev);
-void handle_recording(void);
-void handle_rec_paused(key_event_t k2_ev);
-void handle_history(key_event_t k2_ev);
+key_event_t detect_k1_event(void);
+void handle_idle(key_event_t k1_ev, key_event_t k2_ev);
+void handle_recording(key_event_t k1_ev, key_event_t k2_ev);
+void handle_rec_paused(key_event_t k1_ev, key_event_t k2_ev);
+void handle_history(key_event_t k1_ev, key_event_t k2_ev);
 
 #endif

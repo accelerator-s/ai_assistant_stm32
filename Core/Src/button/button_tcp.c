@@ -68,8 +68,12 @@ void handle_tcp_downlink(void)
         else if (strncmp(line, "AI:", 3) == 0)
         {
             display_add_message(MSG_ROLE_ASSISTANT, line + 3);
+            display_update_bottom_hint("正在合成语音...");
+        }
+        else if (strcmp(line, "DIALOG_DONE") == 0)
+        {
             sys_state = STATE_IDLE;
-            display_update_bottom_hint("K1:录音 K2:发送/新建");
+            display_update_bottom_hint("K1短按录音 K2新建");
         }
         else if (strncmp(line, "SYS:", 4) == 0)
         {
@@ -187,6 +191,7 @@ void handle_tcp_downlink(void)
             }
 
             display_show_system_hint("SPK_WAV");
+            display_update_bottom_hint("正在播放AI语音...");
 
             if (pcm_size == 0u)
             {

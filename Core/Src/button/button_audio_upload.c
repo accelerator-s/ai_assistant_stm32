@@ -117,7 +117,7 @@ void try_send_mic_rec_done(void)
         display_show_system_hint("录音测试数据已上传");
         if (sys_state == STATE_IDLE)
         {
-            display_update_bottom_hint("K1:录音 K2:发送/新建");
+            display_update_bottom_hint("K1短按录音 K2新建");
         }
     }
 }

@@ -1,5 +1,30 @@
 #include "button/button_context.h"
 
+key_event_t detect_k1_event(void)
+{
+    static uint8_t was_pressed = 0u;
+    static uint32_t last_press_tick = 0u;
+    uint8_t pressed = bsp_key_get_k1();
+    uint32_t now = HAL_GetTick();
+
+    if (pressed && !was_pressed)
+    {
+        was_pressed = 1u;
+        if (last_press_tick == 0u || (now - last_press_tick) >= K1_DEBOUNCE_MS)
+        {
+            last_press_tick = now;
+            return KEY_EVENT_K1_PRESS;
+        }
+    }
+    else if (!pressed && was_pressed)
+    {
+        was_pressed = 0u;
+        return KEY_EVENT_K1_RELEASE;
+    }
+
+    return KEY_EVENT_NONE;
+}
+
 key_event_t detect_k2_event(void)
 {
     uint8_t pressed = bsp_key_get_k2();

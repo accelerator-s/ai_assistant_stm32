@@ -359,7 +359,7 @@ void wav_stream_service(void)
 
     if (!s_player.ring.eof &&
         s_player.ring.total_written < s_player.ring.total_expected &&
-        (HAL_GetTick() - s_player.last_rx_tick) > 1500u)
+        (HAL_GetTick() - s_player.last_rx_tick) > 5000u)
     {
         s_player.active = 0u;
         s_player.error = 1u;
