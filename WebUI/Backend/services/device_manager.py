@@ -15,7 +15,7 @@ import uuid
 import wave
 from pathlib import Path
 from collections import deque
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,10 @@ RECV_TIMEOUT = 10
 # display message buffer (128 bytes). The payload is GBK-encoded before send.
 DEVICE_TEXT_FRAME_BYTES = 96
 DEVICE_TEXT_FRAME_GAP_SEC = 0.02
+DEVICE_WAV_STREAM_CHUNK_SIZE = 512
+DEVICE_WAV_STREAM_START_DELAY_SEC = 0.12
+DEVICE_WAV_STREAM_PACE_FACTOR = 0.98
+DEVICE_WAV_STREAM_TIMEOUT_MARGIN_SEC = 15.0
 
 
 class DeviceConnection:
@@ -106,6 +110,10 @@ class DeviceManager:
             Path(__file__).resolve().parent.parent.parent / "data" / "audio"
         )
         self._audio_dir.mkdir(parents=True, exist_ok=True)
+        self._tts_dir = (
+            Path(__file__).resolve().parent.parent.parent / "data" / "tts"
+        )
+        self._tts_dir.mkdir(parents=True, exist_ok=True)
         self._latest_audio: dict[str, object] | None = None
         self._audio_lock = threading.Lock()
 
@@ -254,18 +262,114 @@ class DeviceManager:
         """兼容显式异步调用，实际与 send_command 一样走发送队列。"""
         return self.send_command(command)
 
-    def send_raw_async(self, payload: bytes) -> bool:
-        """向当前活跃设备异步发送原始字节数据。"""
-        client = self._get_primary_client()
+    def send_raw_async(
+        self, payload: bytes, client: DeviceConnection | None = None
+    ) -> bool:
+        """向当前活跃设备发送原始字节数据。
+
+        阻塞等待发送队列空位（最多 30 秒），避免音频流传输时因队列瞬间
+        被填满而误判为连接失败。
+        """
+        client = client or self._get_primary_client()
         if not client:
             return False
 
         try:
-            client.send_queue.put_nowait(payload)
+            client.send_queue.put(payload, timeout=30.0)
             return True
+        except Full:
+            logger.warning("设备 %s 发送队列等待超时，丢弃数据块", client)
+            return False
         except Exception:
             self._remove_client(client)
             return False
+
+    def stream_wav_to_device(
+        self, wav_path: str | Path, client: DeviceConnection | None = None
+    ) -> dict[str, object]:
+        """Stream a mono PCM WAV file to the STM32 speaker and wait for playback."""
+        client = client or self._get_primary_client()
+        if not client:
+            return {"success": False, "message": "设备未连接"}
+
+        try:
+            with wave.open(str(wav_path), "rb") as wavf:
+                channels = wavf.getnchannels()
+                sample_width = wavf.getsampwidth()
+                sample_rate = wavf.getframerate()
+                pcm_data = wavf.readframes(wavf.getnframes())
+        except Exception as exc:
+            logger.exception("读取待播放 WAV 文件失败: %s", wav_path)
+            return {"success": False, "message": f"读取 TTS 音频失败: {exc}"}
+
+        if channels != 1 or sample_width != 2:
+            return {
+                "success": False,
+                "message": "TTS 音频必须是单声道 16-bit PCM WAV",
+            }
+        if sample_rate not in {8000, 11025, 16000}:
+            return {
+                "success": False,
+                "message": f"板端不支持 {sample_rate}Hz TTS 音频",
+            }
+        if not pcm_data:
+            return {"success": False, "message": "TTS 音频为空"}
+
+        duration = len(pcm_data) / float(sample_rate * sample_width)
+        timeout = max(20.0, duration + DEVICE_WAV_STREAM_TIMEOUT_MARGIN_SEC)
+        waiter = self.register_waiter(expected="SPK_WAV_", timeout=timeout)
+
+        try:
+            if not self.send_command(
+                f"SPK_WAV:{len(pcm_data)}:{sample_rate}", client=client
+            ):
+                return {"success": False, "message": "SPK_WAV 指令发送失败"}
+
+            time.sleep(DEVICE_WAV_STREAM_START_DELAY_SEC)
+            bytes_per_second = sample_rate * sample_width
+            chunk_size = DEVICE_WAV_STREAM_CHUNK_SIZE
+
+            for offset in range(0, len(pcm_data), chunk_size):
+                chunk_started = time.monotonic()
+                chunk = pcm_data[offset : offset + chunk_size]
+                if not self.send_raw_async(chunk, client=client):
+                    return {
+                        "success": False,
+                        "message": f"TTS PCM 下发失败: offset={offset}",
+                    }
+
+                interval = (len(chunk) / bytes_per_second) * DEVICE_WAV_STREAM_PACE_FACTOR
+                elapsed = time.monotonic() - chunk_started
+                if elapsed < interval:
+                    time.sleep(interval - elapsed)
+
+            response = self.await_waiter(waiter["waiter_id"], timeout=timeout)
+            if not response:
+                return {
+                    "success": False,
+                    "message": f"设备未在 {timeout:.0f} 秒内完成 TTS 播放",
+                }
+            if "SPK_WAV_DONE" not in response:
+                return {
+                    "success": False,
+                    "message": f"设备返回 TTS 播放错误: {response}",
+                    "response": response,
+                }
+
+            logger.info(
+                "TTS 已在设备播放完成: bytes=%d rate=%d response=%s",
+                len(pcm_data),
+                sample_rate,
+                response,
+            )
+            return {
+                "success": True,
+                "response": response,
+                "bytes": len(pcm_data),
+                "sample_rate": sample_rate,
+            }
+        finally:
+            self.cancel_waiter(waiter["waiter_id"])
 
     @staticmethod
     def _split_device_text(
@@ -331,6 +435,13 @@ class DeviceManager:
             if idx + 1 < len(chunks):
                 time.sleep(DEVICE_TEXT_FRAME_GAP_SEC)
         return ok
+
+    def finish_dialog(
+        self, client: DeviceConnection, system_message: str = ""
+    ) -> None:
+        if system_message:
+            self.send_text_to_device(system_message, role="system", client=client)
+        self.send_command("DIALOG_DONE", client=client)
 
     def wait_response(
         self, command: str, expected: str, timeout: float = 3.0
@@ -557,22 +668,22 @@ class DeviceManager:
     ) -> None:
         audio_path = str(audio_info.get("path") or "")
         if not audio_path:
-            self.send_text_to_device("录音文件路径无效", role="system", client=device)
+            self.finish_dialog(device, "录音文件路径无效")
             return
 
         try:
             from ..app import app_state
             from .chat_service import get_llm_reply
             from .speech_service import recognize_audio
+            from .tts_service import synthesize as tts_synthesize
 
             asr_session = audio_info.get("asr_session")
             config = app_state.get("config")
             provider = (config.get("speech.provider", "") if config else "").lower()
             if not asr_session and provider in {"tencent", "tencent_asr"}:
-                self.send_text_to_device(
-                    "腾讯云实时识别会话未建立，请检查 AppID/网络/密钥配置",
-                    role="system",
-                    client=device,
+                self.finish_dialog(
+                    device,
+                    "腾讯云实时识别会话未建立，请检查 AppID、网络和密钥配置",
                 )
                 return
 
@@ -582,7 +693,7 @@ class DeviceManager:
                 recognized_text = (recognize_audio(audio_path) or "").strip()
 
             if not recognized_text:
-                self.send_text_to_device("未识别到有效语音", role="system", client=device)
+                self.finish_dialog(device, "未识别到有效语音")
                 return
 
             error_prefixes = (
@@ -594,7 +705,7 @@ class DeviceManager:
                 "不支持的语音识别服务商",
             )
             if recognized_text.startswith(error_prefixes):
-                self.send_text_to_device(recognized_text, role="system", client=device)
+                self.finish_dialog(device, recognized_text)
                 return
 
             if asr_session and recognized_text != getattr(asr_session, "last_emitted_text", ""):
@@ -611,15 +722,43 @@ class DeviceManager:
 
             reply_text = (get_llm_reply(session_id, recognized_text) or "").strip()
             if not reply_text:
-                self.send_text_to_device("大模型未返回有效回复", role="system", client=device)
+                self.finish_dialog(device, "大模型未返回有效回复")
                 return
 
             if db:
                 db.add_message(session_id, "assistant", reply_text)
             self.send_text_to_device(reply_text, role="assistant", client=device)
+
+            tts_result = tts_synthesize(
+                region=config.get("tts.azure_region", "") if config else "",
+                subscription_key=config.get("tts.azure_key", "") if config else "",
+                text=reply_text,
+                output_dir=self._tts_dir,
+                voice=config.get("tts.azure_voice", "zh-CN-XiaoxiaoNeural")
+                if config
+                else "zh-CN-XiaoxiaoNeural",
+            )
+            if not tts_result.get("success"):
+                message = str(tts_result.get("message") or "TTS 合成失败")
+                logger.warning("TTS 合成失败: %s", message)
+                self.finish_dialog(device, "TTS 合成失败，请检查配置")
+                return
+
+            audio_filename = str(tts_result.get("audio_filename") or "")
+            playback_result = self.stream_wav_to_device(
+                self._tts_dir / audio_filename,
+                client=device,
+            )
+            if not playback_result.get("success"):
+                message = str(playback_result.get("message") or "TTS 播放失败")
+                logger.warning("设备 TTS 播放失败: %s", message)
+                self.finish_dialog(device, message)
+                return
+
+            self.finish_dialog(device)
         except Exception:
             logger.exception("处理设备录音对话失败")
-            self.send_text_to_device("云端处理录音失败", role="system", client=device)
+            self.finish_dialog(device, "云端处理录音失败")
 
     def _handle_text_line(self, device: DeviceConnection, text: str) -> None:
         if text == "HB":

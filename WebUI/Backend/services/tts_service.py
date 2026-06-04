@@ -1,8 +1,10 @@
 """Azure TTS 语音合成服务"""
 
 import html
+import io
 import logging
 import time
+import wave
 from pathlib import Path
 
 import requests
@@ -12,6 +14,26 @@ logger = logging.getLogger(__name__)
 AZURE_TTS_OUTPUT_FORMAT = "riff-16khz-16bit-mono-pcm"
 TTS_AUDIO_FORMAT = "wav"
 TTS_CONTENT_TYPE = "audio/wav"
+
+
+def _validate_pcm_wav(payload: bytes) -> tuple[bool, str]:
+    if len(payload) <= 44:
+        return False, "Azure TTS 返回了空音频"
+
+    try:
+        with wave.open(io.BytesIO(payload), "rb") as wavf:
+            if wavf.getnchannels() != 1:
+                return False, "Azure TTS 返回的音频不是单声道"
+            if wavf.getsampwidth() != 2:
+                return False, "Azure TTS 返回的音频不是 16-bit PCM"
+            if wavf.getframerate() != 16000:
+                return False, "Azure TTS 返回的音频不是 16kHz"
+            if wavf.getnframes() <= 0:
+                return False, "Azure TTS 返回了空音频"
+    except (wave.Error, EOFError) as exc:
+        return False, f"Azure TTS 返回了无效 WAV: {exc}"
+
+    return True, ""
 
 
 def synthesize(
@@ -69,6 +91,11 @@ def synthesize(
                 "success": False,
                 "message": f"Azure TTS 错误: {response.status_code} {response.reason}",
             }
+
+        valid, validation_error = _validate_pcm_wav(response.content)
+        if not valid:
+            logger.error(validation_error)
+            return {"success": False, "message": validation_error}
 
         filename = f"tts_{int(time.time() * 1000)}.{TTS_AUDIO_FORMAT}"
         filepath = output_dir / filename

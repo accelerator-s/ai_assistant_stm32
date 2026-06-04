@@ -45,7 +45,7 @@ void button_app_run(void)
                 display_update_wifi("已连接", WIFI_COLOR_CONNECTED);
                 if (sys_state == STATE_IDLE)
                 {
-                    display_update_bottom_hint("K1:录音 K2:发送/新建");
+                    display_update_bottom_hint("K1短按录音 K2新建");
                 }
                 break;
 
@@ -161,32 +161,33 @@ void button_app_run(void)
         }
 
         {
+            key_event_t k1_ev = detect_k1_event();
             key_event_t k2_ev = detect_k2_event();
 
             switch (sys_state)
             {
             case STATE_IDLE:
-                handle_idle(k2_ev);
+                handle_idle(k1_ev, k2_ev);
                 break;
 
             case STATE_RECORDING:
-                handle_recording();
+                handle_recording(k1_ev, k2_ev);
                 break;
 
             case STATE_REC_PAUSED:
-                handle_rec_paused(k2_ev);
+                handle_rec_paused(k1_ev, k2_ev);
                 break;
 
             case STATE_WAITING:
                 if (k2_ev == KEY_EVENT_K2_SHORT)
                 {
                     sys_state = STATE_IDLE;
-                    display_update_bottom_hint("K1:录音 K2:发送/新建");
+                    display_update_bottom_hint("K1短按录音 K2新建");
                 }
                 break;
 
             case STATE_HISTORY:
-                handle_history(k2_ev);
+                handle_history(k1_ev, k2_ev);
                 break;
 
             default:

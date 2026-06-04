@@ -216,7 +216,7 @@ static void draw_bottom_bar(void)
 
     /* 默认提示: K1录音 K2发送 */
     lcd_draw_string_cn(8, BOTTOM_BAR_Y + 12,
-                       "K1:录音 K2:发送/新建",
+                       "K1短按录音 K2新建",
                        COLOR_TEXT_SECONDARY, COLOR_BG_STATUS);
 }
 

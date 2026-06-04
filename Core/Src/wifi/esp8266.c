@@ -1750,7 +1750,7 @@ uint16_t esp8266_tcp_read_raw(uint8_t *out, uint16_t max_len)
     if (!out || max_len == 0u)
         return 0u;
 
-    if (s_tcp_phase != TCP_PHASE_DONE_OK || s_tx_phase != TX_ENGINE_IDLE)
+    if (s_tcp_phase != TCP_PHASE_DONE_OK)
         return 0u;
 
     buf_len = esp8266_snapshot_resp();

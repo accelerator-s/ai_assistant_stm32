@@ -1284,6 +1284,8 @@ uint8_t i2s_mic_play_wav_stream(uint16_t sample_rate)
 void i2s_mic_stop_wav_stream(void)
 {
     (void)HAL_I2S_DMAStop(&hi2s2);
+    (void)HAL_DMA_DeInit(&hdma_i2s2_tx);
+    (void)HAL_DMA_DeInit(&hdma_i2s2_rx);
     (void)HAL_I2S_DeInit(&hi2s2);
     i2s_gpio_init();
     if (i2s_config_master_rx() == HAL_OK)
