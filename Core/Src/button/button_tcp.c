@@ -59,7 +59,7 @@ void handle_tcp_downlink(void)
         }
         else if (strncmp(line, "STT:", 4) == 0)
         {
-            display_add_message(MSG_ROLE_USER, line + 4);
+            display_update_last_message(MSG_ROLE_USER, line + 4);
             if (sys_state == STATE_WAITING)
             {
                 display_update_bottom_hint("识别完成，思考中...");
@@ -67,7 +67,7 @@ void handle_tcp_downlink(void)
         }
         else if (strncmp(line, "AI:", 3) == 0)
         {
-            display_add_message(MSG_ROLE_ASSISTANT, line + 3);
+            display_append_last_message(MSG_ROLE_ASSISTANT, line + 3);
             display_update_bottom_hint("正在合成语音...");
         }
         else if (strcmp(line, "DIALOG_DONE") == 0)

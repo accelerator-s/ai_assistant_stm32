@@ -59,6 +59,7 @@ typedef struct
     msg_role_t role;        /* 消息角色 */
     char text[MSG_MAX_LEN]; /* 消息文本（GBK编码） */
     uint8_t text_len;       /* 实际文本长度 */
+    uint8_t continuation;   /* 是否与上一条同角色消息合并显示 */
 } display_msg_t;
 
 /* ===================== 初始化与状态切换 ===================== */
@@ -116,7 +117,15 @@ void display_add_message(msg_role_t role, const char *text);
 void display_update_last_message(msg_role_t role, const char *text);
 
 /**
- * 显示系统提示信息（居中小字）
+ * 追加文本到最后一条同角色消息；若放不下则作为续片合并显示。
+ * 用于流式/分片下发的 AI 回复保持同一个气泡。
+ * @param role  消息角色
+ * @param text  要追加的文本（GBK编码字符串）
+ */
+void display_append_last_message(msg_role_t role, const char *text);
+
+/**
+ * 记录系统提示信息到调试日志，不在聊天区显示。
  * @param text 提示文本
  */
 void display_show_system_hint(const char *text);

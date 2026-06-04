@@ -54,7 +54,7 @@
 /* WiFi 连接超时（毫秒），热点连接较慢需要更长时间 */
 #define ESP8266_WIFI_JOIN_TIMEOUT 15000
 
-/* 串口接收线性缓冲区大小（增大避免 AT 响应溢出丢失导致误判断连） */
-#define ESP8266_RX_BUF_SIZE 1024
+/* 串口接收环形缓冲区大小（需吸收 +IPD 二进制帧与主循环调度抖动） */
+#define ESP8266_RX_BUF_SIZE 4096
 
 #endif /* __WIFI_CONFIG_H */

@@ -15,6 +15,8 @@
 #define WAV_STREAM_DEBUG 0
 #endif
 
+#define WAV_STREAM_RX_CHUNK_SIZE 256u
+
 #if WAV_STREAM_DEBUG
 #define WAV_LOG(...) debug_printf(__VA_ARGS__)
 #else
@@ -55,6 +57,7 @@ typedef struct
 
 static wav_stream_player_t s_player;
 static uint16_t wav_dma_buf[WAV_DMA_BUFFER_WORDS];
+static uint8_t wav_rx_tmp[WAV_STREAM_RX_CHUNK_SIZE];
 
 /* ==================== 环形缓冲区操作 ==================== */
 
@@ -111,53 +114,43 @@ static uint16_t ring_write(wav_ring_buf_t *r, const uint8_t *data, uint16_t len)
 }
 
 /**
- * 从环形缓冲区读取数据（ISR 中调用）
- * 读取 int16 样本，每个样本 2 字节
+ * 从环形缓冲区读取 mono PCM16 并直接展开成 I2S stereo DMA 数据。
+ * ISR 中调用，避免在中断栈上放置一整个半缓冲的临时 samples 数组。
  */
-static uint16_t ring_read_samples(wav_ring_buf_t *r, int16_t *dst, uint16_t frames)
+static uint16_t ring_read_to_stereo_dma(wav_ring_buf_t *r, uint16_t *dst, uint16_t frames)
 {
     uint16_t avail_bytes = ring_available(r);
-    uint16_t need_bytes = (uint16_t)(frames * 2u);
-    uint16_t read_bytes;
     uint16_t read_frames;
     uint16_t t;
-    uint16_t first_chunk;
-    uint16_t offset;
+    uint16_t i;
 
-    if (need_bytes > avail_bytes)
-        need_bytes = avail_bytes;
-
-    /* 对齐到 2 字节（一个样本） */
-    need_bytes &= ~1u;
-    read_bytes = need_bytes;
-    read_frames = (uint16_t)(read_bytes / 2u);
-
-    if (read_bytes == 0u)
+    read_frames = (uint16_t)(avail_bytes / 2u);
+    if (read_frames > frames)
+        read_frames = frames;
+    if (read_frames == 0u)
         return 0u;
 
     t = r->tail;
-    offset = 0u;
-
-    /* 读到缓冲区末尾 */
-    first_chunk = (uint16_t)(WAV_RING_BUF_SIZE - t);
-    if (first_chunk > read_bytes)
-        first_chunk = read_bytes;
-
-    memcpy((uint8_t *)dst, &r->buf[t], first_chunk);
-    offset = first_chunk;
-    read_bytes -= first_chunk;
-
-    if (read_bytes > 0u)
+    for (i = 0u; i < read_frames; i++)
     {
-        /* 回绕读 */
-        memcpy((uint8_t *)dst + offset, &r->buf[0], read_bytes);
-        r->tail = read_bytes;
-    }
-    else
-    {
-        r->tail = (uint16_t)((t + first_chunk) % WAV_RING_BUF_SIZE);
+        uint16_t lo = r->buf[t];
+        uint16_t sample;
+
+        t++;
+        if (t >= WAV_RING_BUF_SIZE)
+            t = 0u;
+
+        sample = (uint16_t)(lo | ((uint16_t)r->buf[t] << 8));
+
+        t++;
+        if (t >= WAV_RING_BUF_SIZE)
+            t = 0u;
+
+        dst[i * 2u] = sample;
+        dst[i * 2u + 1u] = sample;
     }
 
+    r->tail = t;
     r->total_read += (uint32_t)(read_frames * 2u);
     return read_frames;
 }
@@ -171,25 +164,17 @@ static uint16_t ring_read_samples(wav_ring_buf_t *r, int16_t *dst, uint16_t fram
  */
 static void fill_dma_half(uint16_t *dst, uint16_t frames)
 {
-    int16_t samples[WAV_DMA_HALF_FRAMES];
     uint16_t got;
     uint16_t i;
 
-    got = ring_read_samples(&s_player.ring, samples, frames);
+    got = ring_read_to_stereo_dma(&s_player.ring, dst, frames);
     if (got < frames && !s_player.ring.eof)
     {
         s_player.underrun_count++;
     }
 
-    /* 填充有数据的部分 */
-    for (i = 0u; i < got; i++)
-    {
-        dst[i * 2u] = (uint16_t)samples[i];
-        dst[i * 2u + 1u] = (uint16_t)samples[i];
-    }
-
     /* 无数据部分填静音 */
-    for (; i < frames; i++)
+    for (i = got; i < frames; i++)
     {
         dst[i * 2u] = 0u;
         dst[i * 2u + 1u] = 0u;
@@ -315,7 +300,6 @@ void wav_stream_mark_eof(void)
 
 void wav_stream_service(void)
 {
-    uint8_t tmp[256];
     uint16_t n;
     uint8_t read_rounds = 0u;
 
@@ -342,16 +326,16 @@ void wav_stream_service(void)
 
             remaining = s_player.ring.total_expected - s_player.ring.total_written;
             free_bytes = ring_free(&s_player.ring);
-            max_read = (free_bytes < sizeof(tmp)) ? free_bytes : (uint16_t)sizeof(tmp);
+            max_read = (free_bytes < sizeof(wav_rx_tmp)) ? free_bytes : (uint16_t)sizeof(wav_rx_tmp);
             if (remaining < max_read)
                 max_read = (uint16_t)remaining;
             if (max_read == 0u)
                 break;
 
-            n = esp8266_tcp_read_raw(tmp, max_read);
+            n = esp8266_tcp_read_raw(wav_rx_tmp, max_read);
             if (n == 0u)
                 break;
-            wav_stream_feed(tmp, n);
+            wav_stream_feed(wav_rx_tmp, n);
             s_player.last_rx_tick = HAL_GetTick();
             read_rounds++;
         }

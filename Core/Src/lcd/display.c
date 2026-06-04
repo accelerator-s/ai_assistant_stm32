@@ -91,6 +91,69 @@ static uint16_t calc_text_width_range(const char *begin, const char *end)
     return width;
 }
 
+static uint8_t msg_physical_idx(uint8_t logical_idx)
+{
+    return (uint8_t)((msg_head + logical_idx) % MSG_MAX_COUNT);
+}
+
+static size_t copy_text_limited(char *dst, size_t dst_size, const char *src)
+{
+    size_t used = 0u;
+    const char *p = src;
+
+    if (!dst || dst_size == 0u)
+        return 0u;
+
+    if (!src)
+    {
+        dst[0] = '\0';
+        return 0u;
+    }
+
+    while (*p)
+    {
+        uint8_t clen = text_char_len(p);
+
+        if (clen == 0u || (used + clen) >= dst_size)
+            break;
+
+        memcpy(&dst[used], p, clen);
+        used += clen;
+        p += clen;
+    }
+
+    dst[used] = '\0';
+    return (size_t)(p - src);
+}
+
+static size_t append_text_limited(char *dst, size_t dst_size, const char *src)
+{
+    size_t used;
+    const char *p = src;
+
+    if (!dst || dst_size == 0u)
+        return 0u;
+
+    used = strlen(dst);
+    if (!src || used >= (dst_size - 1u))
+        return 0u;
+
+    while (*p)
+    {
+        uint8_t clen = text_char_len(p);
+
+        if (clen == 0u || (used + clen) >= dst_size)
+            break;
+
+        memcpy(&dst[used], p, clen);
+        used += clen;
+        p += clen;
+    }
+
+    dst[used] = '\0';
+    return (size_t)(p - src);
+}
+
 static void dbg_log_push_raw_line(const char *line)
 {
     uint8_t idx;
@@ -415,6 +478,189 @@ static uint16_t draw_message_bubble(uint16_t y, const display_msg_t *msg)
     return total_h;
 }
 
+static uint8_t message_group_end(uint8_t start_idx)
+{
+    uint8_t end_idx = (uint8_t)(start_idx + 1u);
+
+    while (end_idx < msg_count)
+    {
+        uint8_t idx = msg_physical_idx(end_idx);
+        uint8_t prev_idx = msg_physical_idx((uint8_t)(end_idx - 1u));
+
+        if (!msg_buf[idx].continuation || msg_buf[idx].role != msg_buf[prev_idx].role)
+            break;
+
+        end_idx++;
+    }
+
+    return end_idx;
+}
+
+static uint16_t calc_message_group_height(uint8_t start_idx, uint8_t end_idx)
+{
+    uint8_t idx = msg_physical_idx(start_idx);
+    msg_role_t role = msg_buf[idx].role;
+
+    if (role == MSG_ROLE_SYSTEM)
+    {
+        uint16_t sys_max_w = LCD_WIDTH - 12u;
+        uint16_t text_h = 0u;
+
+        for (uint8_t i = start_idx; i < end_idx; i++)
+        {
+            idx = msg_physical_idx(i);
+            text_h = (uint16_t)(text_h + calc_text_height(msg_buf[idx].text, sys_max_w));
+        }
+
+        return (uint16_t)(text_h + 8u);
+    }
+    else
+    {
+        uint16_t max_w = LCD_WIDTH - 20u - 24u - 8u - 8u;
+        uint16_t text_h = 0u;
+
+        for (uint8_t i = start_idx; i < end_idx; i++)
+        {
+            idx = msg_physical_idx(i);
+            text_h = (uint16_t)(text_h + calc_text_height(msg_buf[idx].text, max_w));
+        }
+
+        return (uint16_t)(text_h + 8u + 8u);
+    }
+}
+
+static uint16_t draw_message_group(uint16_t y, uint8_t start_idx, uint8_t end_idx)
+{
+    uint8_t first_idx = msg_physical_idx(start_idx);
+    const display_msg_t *first_msg = &msg_buf[first_idx];
+
+    if ((uint8_t)(end_idx - start_idx) == 1u)
+        return draw_message_bubble(y, first_msg);
+
+    if (first_msg->role == MSG_ROLE_SYSTEM)
+    {
+        uint16_t draw_y = y;
+        uint16_t total_h = calc_message_group_height(start_idx, end_idx);
+        uint16_t sys_max_w = LCD_WIDTH - 12u;
+        uint16_t visible_h = (y < BOTTOM_BAR_Y) ? (uint16_t)(BOTTOM_BAR_Y - y) : 0u;
+        uint8_t oversized = (total_h > CHAT_AREA_H) ? 1u : 0u;
+
+        if ((!oversized && y + total_h > BOTTOM_BAR_Y) || y < CHAT_AREA_Y || visible_h == 0u)
+            return total_h;
+
+        for (uint8_t i = start_idx; i < end_idx; i++)
+        {
+            uint8_t idx = msg_physical_idx(i);
+            uint16_t text_h = draw_center_wrapped_text((uint16_t)(draw_y + 4u),
+                                                       msg_buf[idx].text, sys_max_w,
+                                                       COLOR_TEXT_DIM, COLOR_BG_DARK);
+            draw_y = (uint16_t)(draw_y + text_h);
+        }
+
+        return total_h;
+    }
+    else
+    {
+        uint16_t bubble_margin = 4u;
+        uint16_t bubble_padding = 4u;
+        uint16_t avatar_size = 20u;
+        uint16_t avatar_gap = 4u;
+        uint16_t max_bubble_w = LCD_WIDTH - avatar_size - avatar_gap - bubble_margin * 2u - bubble_padding * 2u;
+        uint16_t text_h = 0u;
+        uint16_t bubble_h;
+        uint16_t bubble_w;
+        uint16_t total_h;
+        uint16_t text_y;
+        uint16_t visible_h = (y < BOTTOM_BAR_Y) ? (uint16_t)(BOTTOM_BAR_Y - y) : 0u;
+        uint8_t oversized;
+
+        for (uint8_t i = start_idx; i < end_idx; i++)
+        {
+            uint8_t idx = msg_physical_idx(i);
+            text_h = (uint16_t)(text_h + calc_text_height(msg_buf[idx].text, max_bubble_w));
+        }
+
+        bubble_h = (uint16_t)(text_h + bubble_padding * 2u);
+        bubble_w = (uint16_t)(max_bubble_w + bubble_padding * 2u);
+        total_h = (uint16_t)(bubble_h + bubble_margin * 2u);
+        oversized = (total_h > CHAT_AREA_H) ? 1u : 0u;
+
+        if ((!oversized && y + total_h > BOTTOM_BAR_Y) || y < CHAT_AREA_Y || visible_h == 0u)
+            return total_h;
+
+        if (oversized && visible_h > bubble_margin * 2u)
+        {
+            bubble_h = (uint16_t)(visible_h - bubble_margin * 2u);
+        }
+
+        if (first_msg->role == MSG_ROLE_USER)
+        {
+            uint16_t bubble_x;
+            uint16_t avatar_cx = LCD_WIDTH - bubble_margin - avatar_size / 2u;
+            uint16_t avatar_cy = (uint16_t)(y + bubble_margin + avatar_size / 2u);
+
+            lcd_fill_circle(avatar_cx, avatar_cy, avatar_size / 2u, COLOR_ACCENT_GREEN);
+            lcd_draw_char((uint16_t)(avatar_cx - FONT_W / 2u), (uint16_t)(avatar_cy - FONT_H / 2u),
+                          username[0], COLOR_WHITE, COLOR_ACCENT_GREEN);
+
+            bubble_x = (uint16_t)(LCD_WIDTH - bubble_margin - avatar_size - avatar_gap - bubble_w);
+            lcd_fill_rounded_rect(bubble_x, (uint16_t)(y + bubble_margin),
+                                  bubble_w, bubble_h, 6u, COLOR_BG_BUBBLE_USR);
+
+            text_y = (uint16_t)(y + bubble_margin + bubble_padding);
+            for (uint8_t i = start_idx; i < end_idx; i++)
+            {
+                uint8_t idx = msg_physical_idx(i);
+                uint16_t part_h = calc_text_height(msg_buf[idx].text, max_bubble_w);
+                uint16_t remaining_h = (text_y < BOTTOM_BAR_Y) ? (uint16_t)(BOTTOM_BAR_Y - text_y) : 0u;
+
+                if (remaining_h == 0u)
+                    break;
+                if (part_h > remaining_h)
+                    part_h = remaining_h;
+
+                lcd_draw_text_wrap((uint16_t)(bubble_x + bubble_padding), text_y,
+                                   max_bubble_w, part_h,
+                                   msg_buf[idx].text, COLOR_TEXT_PRIMARY, COLOR_BG_BUBBLE_USR);
+                text_y = (uint16_t)(text_y + part_h);
+            }
+        }
+        else
+        {
+            uint16_t avatar_cx = bubble_margin + avatar_size / 2u;
+            uint16_t avatar_cy = (uint16_t)(y + bubble_margin + avatar_size / 2u);
+            uint16_t bubble_x = bubble_margin + avatar_size + avatar_gap;
+
+            lcd_fill_circle(avatar_cx, avatar_cy, avatar_size / 2u, COLOR_ACCENT_TEAL);
+            lcd_draw_string((uint16_t)(avatar_cx - 6u), (uint16_t)(avatar_cy - FONT_H / 2u),
+                            "AI", COLOR_WHITE, COLOR_ACCENT_TEAL);
+
+            lcd_fill_rounded_rect(bubble_x, (uint16_t)(y + bubble_margin),
+                                  bubble_w, bubble_h, 6u, COLOR_BG_BUBBLE_AI);
+
+            text_y = (uint16_t)(y + bubble_margin + bubble_padding);
+            for (uint8_t i = start_idx; i < end_idx; i++)
+            {
+                uint8_t idx = msg_physical_idx(i);
+                uint16_t part_h = calc_text_height(msg_buf[idx].text, max_bubble_w);
+                uint16_t remaining_h = (text_y < BOTTOM_BAR_Y) ? (uint16_t)(BOTTOM_BAR_Y - text_y) : 0u;
+
+                if (remaining_h == 0u)
+                    break;
+                if (part_h > remaining_h)
+                    part_h = remaining_h;
+
+                lcd_draw_text_wrap((uint16_t)(bubble_x + bubble_padding), text_y,
+                                   max_bubble_w, part_h,
+                                   msg_buf[idx].text, COLOR_TEXT_PRIMARY, COLOR_BG_BUBBLE_AI);
+                text_y = (uint16_t)(text_y + part_h);
+            }
+        }
+
+        return total_h;
+    }
+}
+
 /* ===================== 聊天区域完整重绘 ===================== */
 
 /**
@@ -438,19 +684,26 @@ static void redraw_chat_area(void)
     }
 
     uint16_t heights[MSG_MAX_COUNT];
+    uint8_t group_starts[MSG_MAX_COUNT];
+    uint8_t group_ends[MSG_MAX_COUNT];
+    uint8_t group_count = 0u;
     uint16_t total_height = 0u;
     uint8_t start_idx = 0u;
-    uint8_t end_idx = msg_count;
+    uint8_t end_idx = 0u;
     uint16_t draw_y = CHAT_AREA_Y;
 
-    for (uint8_t i = 0; i < msg_count; i++)
+    for (uint8_t i = 0u; i < msg_count;)
     {
-        uint8_t idx = (msg_head + i) % MSG_MAX_COUNT;
-        uint16_t max_w = LCD_WIDTH - 20 - 24 - 8 - 8;
-        uint16_t text_h = calc_text_height(msg_buf[idx].text, max_w);
-        heights[i] = (uint16_t)(text_h + 8u + 8u);
-        total_height += heights[i];
+        uint8_t next_idx = message_group_end(i);
+
+        group_starts[group_count] = i;
+        group_ends[group_count] = next_idx;
+        heights[group_count] = calc_message_group_height(i, next_idx);
+        total_height = (uint16_t)(total_height + heights[group_count]);
+        group_count++;
+        i = next_idx;
     }
+    end_idx = group_count;
 
     if (total_height <= CHAT_AREA_H)
     {
@@ -459,7 +712,7 @@ static void redraw_chat_area(void)
     }
     else
     {
-        uint8_t bottom_start = msg_count;
+        uint8_t bottom_start = group_count;
         int16_t remain = (int16_t)CHAT_AREA_H;
 
         while (bottom_start > 0u && remain > 0)
@@ -468,7 +721,10 @@ static void redraw_chat_area(void)
             remain -= (int16_t)heights[bottom_start];
         }
         if (remain < 0)
-            bottom_start++;
+        {
+            if (heights[bottom_start] <= CHAT_AREA_H)
+                bottom_start++;
+        }
 
         if (chat_scroll_offset < 0)
             chat_scroll_offset = 0;
@@ -480,10 +736,14 @@ static void redraw_chat_area(void)
         {
             uint16_t used_h = 0u;
             end_idx = start_idx;
-            while (end_idx < msg_count)
+            while (end_idx < group_count)
             {
                 if ((uint16_t)(used_h + heights[end_idx]) > CHAT_AREA_H)
+                {
+                    if (used_h == 0u)
+                        end_idx++;
                     break;
+                }
                 used_h = (uint16_t)(used_h + heights[end_idx]);
                 end_idx++;
             }
@@ -495,7 +755,7 @@ static void redraw_chat_area(void)
         {
             uint16_t track_x = LCD_WIDTH - 7u;
             uint16_t track_h = CHAT_AREA_H;
-            uint16_t thumb_h = (uint16_t)((uint32_t)(end_idx - start_idx) * track_h / msg_count);
+            uint16_t thumb_h = (uint16_t)((uint32_t)(end_idx - start_idx) * track_h / group_count);
 
             if (thumb_h < 16u)
                 thumb_h = 16u;
@@ -503,8 +763,8 @@ static void redraw_chat_area(void)
             lcd_fill_rect(track_x, CHAT_AREA_Y, 6u, track_h, COLOR_BG_SIDEBAR);
 
             {
-                uint16_t max_top = (msg_count > (end_idx - start_idx))
-                                       ? (uint16_t)(msg_count - (end_idx - start_idx))
+                uint16_t max_top = (group_count > (end_idx - start_idx))
+                                       ? (uint16_t)(group_count - (end_idx - start_idx))
                                        : 0u;
                 uint16_t thumb_y = CHAT_AREA_Y;
                 if (max_top > 0u)
@@ -519,8 +779,7 @@ static void redraw_chat_area(void)
 
     for (uint8_t i = start_idx; i < end_idx; i++)
     {
-        uint8_t idx = (msg_head + i) % MSG_MAX_COUNT;
-        uint16_t h = draw_message_bubble(draw_y, &msg_buf[idx]);
+        uint16_t h = draw_message_group(draw_y, group_starts[i], group_ends[i]);
         draw_y = (uint16_t)(draw_y + h);
         if (draw_y >= BOTTOM_BAR_Y)
             break;
@@ -824,36 +1083,66 @@ void display_clear_messages(void)
     }
 }
 
-void display_add_message(msg_role_t role, const char *text)
+static void redraw_chat_area_if_visible(void)
 {
-    if (!text || text[0] == '\0')
-        return;
-
-    /* 环形缓冲区写入 */
-    uint8_t idx;
-    if (msg_count < MSG_MAX_COUNT)
-    {
-        idx = (msg_head + msg_count) % MSG_MAX_COUNT;
-        msg_count++;
-    }
-    else
-    {
-        /* 缓冲区已满，覆盖最旧消息 */
-        idx = msg_head;
-        msg_head = (msg_head + 1) % MSG_MAX_COUNT;
-    }
-
-    msg_buf[idx].role = role;
-    strncpy(msg_buf[idx].text, text, MSG_MAX_LEN - 1);
-    msg_buf[idx].text[MSG_MAX_LEN - 1] = '\0';
-    msg_buf[idx].text_len = (uint8_t)strlen(msg_buf[idx].text);
-
-    /* 刷新聊天区域 */
     if (current_state == DISPLAY_STATE_CHAT ||
         current_state == DISPLAY_STATE_CHAT_SCROLL)
     {
         redraw_chat_area();
     }
+}
+
+static size_t display_add_message_internal(msg_role_t role, const char *text, uint8_t continuation)
+{
+    uint8_t idx;
+    size_t copied;
+
+    if (!text || text[0] == '\0')
+        return 0u;
+
+    if (msg_count < MSG_MAX_COUNT)
+    {
+        idx = (uint8_t)((msg_head + msg_count) % MSG_MAX_COUNT);
+        msg_count++;
+    }
+    else
+    {
+        idx = msg_head;
+        msg_head = (uint8_t)((msg_head + 1u) % MSG_MAX_COUNT);
+    }
+
+    msg_buf[idx].role = role;
+    msg_buf[idx].continuation = continuation;
+    copied = copy_text_limited(msg_buf[idx].text, sizeof(msg_buf[idx].text), text);
+    msg_buf[idx].text_len = (uint8_t)strlen(msg_buf[idx].text);
+
+    return copied;
+}
+
+static void display_add_message_sequence(msg_role_t role, const char *text)
+{
+    const char *p = text;
+    uint8_t continuation = 0u;
+
+    while (p && *p)
+    {
+        size_t copied = display_add_message_internal(role, p, continuation);
+
+        if (copied == 0u)
+            break;
+
+        p += copied;
+        continuation = 1u;
+    }
+}
+
+void display_add_message(msg_role_t role, const char *text)
+{
+    if (!text || text[0] == '\0')
+        return;
+
+    display_add_message_sequence(role, text);
+    redraw_chat_area_if_visible();
 }
 
 void display_update_last_message(msg_role_t role, const char *text)
@@ -869,27 +1158,65 @@ void display_update_last_message(msg_role_t role, const char *text)
         return;
     }
 
-    idx = (uint8_t)((msg_head + msg_count - 1u) % MSG_MAX_COUNT);
+    idx = msg_physical_idx((uint8_t)(msg_count - 1u));
     if (msg_buf[idx].role != role)
     {
         display_add_message(role, text);
         return;
     }
 
-    strncpy(msg_buf[idx].text, text, MSG_MAX_LEN - 1);
-    msg_buf[idx].text[MSG_MAX_LEN - 1] = '\0';
+    (void)copy_text_limited(msg_buf[idx].text, sizeof(msg_buf[idx].text), text);
     msg_buf[idx].text_len = (uint8_t)strlen(msg_buf[idx].text);
 
-    if (current_state == DISPLAY_STATE_CHAT ||
-        current_state == DISPLAY_STATE_CHAT_SCROLL)
+    redraw_chat_area_if_visible();
+}
+
+void display_append_last_message(msg_role_t role, const char *text)
+{
+    uint8_t idx;
+    const char *p = text;
+
+    if (!text || text[0] == '\0')
+        return;
+
+    if (msg_count == 0u)
     {
-        redraw_chat_area();
+        display_add_message_sequence(role, text);
+        redraw_chat_area_if_visible();
+        return;
     }
+
+    idx = msg_physical_idx((uint8_t)(msg_count - 1u));
+    if (msg_buf[idx].role != role)
+    {
+        display_add_message_sequence(role, text);
+        redraw_chat_area_if_visible();
+        return;
+    }
+
+    while (*p)
+    {
+        size_t copied = append_text_limited(msg_buf[idx].text, sizeof(msg_buf[idx].text), p);
+        msg_buf[idx].text_len = (uint8_t)strlen(msg_buf[idx].text);
+        p += copied;
+
+        if (*p == '\0')
+            break;
+
+        copied = display_add_message_internal(role, p, 1u);
+        if (copied == 0u)
+            break;
+
+        idx = msg_physical_idx((uint8_t)(msg_count - 1u));
+        p += copied;
+    }
+
+    redraw_chat_area_if_visible();
 }
 
 void display_show_system_hint(const char *text)
 {
-    display_add_message(MSG_ROLE_SYSTEM, text);
+    display_push_debug_line(text);
 }
 
 void display_start_recording(void)
